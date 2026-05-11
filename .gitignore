@@ -3,5 +3,7 @@ runs/
 src/datasets/
 src/models/
 src/etc/
+src/__pycache__/
+
 
 .DS_STORE
