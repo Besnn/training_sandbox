@@ -1,9 +1,12 @@
-runs/
 .venv/
+
+runs/
 src/datasets/
 src/models/
 src/etc/
 src/__pycache__/
+
+src/*.pt
 
 
 .DS_STORE

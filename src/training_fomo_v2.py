@@ -14,14 +14,14 @@ class FOMO_PL_480(nn.Module):
     def __init__(self, num_classes):
         super(FOMO_PL_480, self).__init__()
         # MobileNetV2 di default.
-        # NOTA: EI usa alpha=0.35, PyTorch di default usa alpha=1.0 (più grosso e preciso).
+        # NOTA: Edge Impulse usa alpha=0.35, PyTorch di default usa alpha=1.0 (più grosso e preciso).
         backbone = models.mobilenet_v2(weights='DEFAULT').features
 
         # Tagliamo la rete esattamente al punto di risoluzione 1/8 (block_6)
-        # Questo garantisce che un input 640x640 esca come 80x80 con 32 canali
+        # Questo garantisce che un input 480x480 esca come 60x60 con 32 canali
         self.features = nn.Sequential(*list(backbone.children())[:7])
 
-        # La "Testa" esatta di FOMO: Solo convoluzioni 1x1, niente 3x3, niente dropout.
+        # La testa esatta di FOMO: convoluzioni 1x1, no dropout
         self.head = nn.Sequential(
             nn.Conv2d(in_channels=32, out_channels=32, kernel_size=1, stride=1),
             nn.ReLU(),
@@ -80,7 +80,7 @@ class YOLOCentroidDataset(Dataset):
                     if len(parts) < 3: continue
                     cls_id, x_c, y_c = int(parts[0]), float(parts[1]), float(parts[2])
 
-                    # Calcolo della cella nella griglia 80x80
+                    # Calcolo della cella nella griglia 60x60
                     gx = min(int(x_c * self.grid_size), self.grid_size - 1)
                     gy = min(int(y_c * self.grid_size), self.grid_size - 1)
 
@@ -123,11 +123,10 @@ def train():
 
     print(f"Immagini trovate: Training={len(train_ds)}, Val={len(val_ds)}")
 
-    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True, num_workers=0)
+    train_loader = DataLoader(train_ds, batch_size=16, shuffle=True, num_workers=0)
     num_classes = len(data_cfg['names'])
     model = FOMO_PL_480(num_classes=num_classes).to(device)
 
-    # IL SEGRETO DI FOMO: Background=1.0, Oggetti=100.0
     loss_weights = torch.tensor([1.0] + [100.0] * num_classes).to(device)
     criterion = nn.CrossEntropyLoss(weight=loss_weights)
 
@@ -152,13 +151,11 @@ def train():
             optimizer.step()
             l_sum += loss.item()
 
-            # STAMPA DI DEBUG: Ogni 10 batch (es. 10, 20, 30...)
             if (i + 1) % 2 == 0:
                 print(f"      Batch {i + 1}/{len(train_loader)} elaborato. Loss temporanea: {loss.item():.4f}")
 
         print(f"Epoch {epoch + 1}/{epochs} COMPLETATA - Loss Media: {l_sum / len(train_loader):.4f}")
 
-    # Salva il modello per l'esportazione in ONNX successiva
     torch.save(model.state_dict(), os.path.join(src_dir, "fomo_pl_mac.pt"))
     print("\nTraining completato. Modello salvato come fomo_pl_mac.pt")
 

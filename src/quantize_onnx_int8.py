@@ -11,8 +11,8 @@ from onnxruntime.quantization import (
     quant_pre_process
 )
 
-MODEL_FP32 = "models/best_preprocessed.onnx"
-MODEL_INT8 = "models/best_int8.onnx"
+MODEL_FP32 = "models/yolov8n-obb-onnx-quant-preprocessed.onnx"
+MODEL_INT8 = "models/yolov8n-obb-onnx/yolov8n-obb-int8.onnx"
 CALIB_DIR = "datasets/split_obb_dataset/train/images"
 
 IMG_SIZE = 640
