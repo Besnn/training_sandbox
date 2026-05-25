@@ -19,7 +19,7 @@ def train_obb_nano():
         batch=16,
         device="mps",  # Usa il chip Apple Silicon (M1/M2/M3)
         save=True,
-        patience=30,  # Early stopping un po' più permissivo
+        patience=20,  # Early stopping un po' più permissivo
         project='runs/obb',
         name='yolo26_nano_obb'
     )

@@ -24,7 +24,7 @@ def train_obb_nano():
         name='train_nano_obb'
     )
 
-    print("Training completato. I pesi sono in: runs/obb/train_nano_obb/weights/best.pt")
+    print("Training completato. I pesi sono in: runs/obb/train_yolov8_nano_obb/weights/best.pt")
     return model
 
 

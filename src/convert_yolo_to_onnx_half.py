@@ -1,7 +1,7 @@
 from ultralytics import YOLO
 from pathlib import Path
 
-CUSTOM_MODEL_NAME = "models/yolov8n-obb-onnx/yolov8n-obb-fp16.onnx"
+CUSTOM_MODEL_NAME = "models/yolo26n-obb-onnx/yolo26n-obb-fp16.onnx"
 
 model = YOLO('models/yolov8n-obb.pt')
 

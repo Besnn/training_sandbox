@@ -1,9 +1,9 @@
 from ultralytics import YOLO
 from pathlib import Path
 
-CUSTOM_MODEL_NAME = "models/yolov8n-obb-onnx/yolov8n-obb-fp32.onnx"
+CUSTOM_MODEL_NAME = "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx"
 
-model = YOLO('models/yolov8n-obb.pt')
+model = YOLO('models/yolo26n-obb-pt/yolo26n-best.pt')
 
 exported_path = model.export(format='onnx', imgsz=640, opset=21)
 
