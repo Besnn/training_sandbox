@@ -1,0 +1,5 @@
+python3 rtsp_snapshot.py rtsp://cam/stream1 \
+  --schedule-file orari_treni.txt \
+  --warmup 10 \
+  --window-before 300 --window-after 300 \
+  --interval 3

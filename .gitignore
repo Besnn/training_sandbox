@@ -3,8 +3,11 @@
 runs/
 src/datasets/
 src/models/
+src/benchmark_results/
 src/etc/
 src/__pycache__/
+src/annotation_viewer/__pycache__/
+src/annotation_viewer/__pycache__/app.cpython-311.pyc
 
 src/*.pt
 

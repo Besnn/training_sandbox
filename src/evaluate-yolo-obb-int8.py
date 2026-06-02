@@ -36,25 +36,30 @@ PERMISSIVE_IOU = 0.25
 
 # Match Ultralytics val defaults: keep loose conf during AP collection
 CONF_THRESHOLD_INFER = 0.001
-NMS_IOU = 0.25
+NMS_IOU = 0.10
 
 # Confusion matrix thresholds (mirror Ultralytics defaults)
 CONFMAT_IOU = 0.25
-CONFMAT_CONF = 0.6
+CONFMAT_CONF = 0.5
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_MODELS = {
-    "YOLOv8-OBB-INT8": "models/yolov8n-obb-onnx/yolov8n-obb-int8.onnx",
+    "YOLOv8n-OBB-INT8": "models/yolov8n-obb-onnx/yolov8n-obb-int8.onnx",
+    "YOLO26n-OBB-INT8": "models/yolo26n-obb-onnx/yolo26n-obb-int8.onnx",
 }
 DEFAULT_VAL_IMAGES = (
     "/Users/besnn/PycharmProjects/YOLOv8 Traffic Light Model/"
-    "traffic_signal_detection/src/datasets/split_obb_dataset/test/images"
+    "traffic_signal_detection/src/datasets/yolo_pl_test/images"
+    # "traffic_signal_detection/src/datasets/split_obb_dataset/test/images"
 )
 DEFAULT_VAL_LABELS = (
     "/Users/besnn/PycharmProjects/YOLOv8 Traffic Light Model/"
-    "traffic_signal_detection/src/datasets/split_obb_dataset/test/labels"
+    "traffic_signal_detection/src/datasets/yolo_pl_test/labels"
+    # "traffic_signal_detection/src/datasets/split_obb_dataset/test/labels"
 )
+DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR / "benchmark_results")
 
 
 # --------------------------------------------------------------------------- #
@@ -76,22 +81,38 @@ def poly_iou(poly_a: np.ndarray, poly_b: np.ndarray) -> float:
 # --------------------------------------------------------------------------- #
 # I/O
 # --------------------------------------------------------------------------- #
-def load_gt(label_path: str, img_w: int, img_h: int):
-    """Return list of (class_id, polygon[4,2] in pixel coords)."""
+def load_gt(label_path: str, img_w: int, img_h: int, return_issues=False):
+    """Return list of (class_id, polygon[4,2] in clipped pixel coords)."""
     out = []
+    issues = []
     if not os.path.isfile(label_path):
-        return out
+        issues.append(f"missing label file: {label_path}")
+        return (out, issues) if return_issues else out
     with open(label_path) as f:
-        for raw in f:
+        for line_no, raw in enumerate(f, start=1):
             parts = raw.strip().split()
-            if len(parts) < 9:
+            if not parts:
                 continue
-            cls = int(parts[0])
-            xy = np.array(parts[1:9], dtype=np.float64).reshape(4, 2)
+            if len(parts) < 9:
+                issues.append(f"{label_path}:{line_no}: expected 9 values, got {len(parts)}")
+                continue
+            try:
+                cls = int(float(parts[0]))
+                xy = np.array(parts[1:9], dtype=np.float64).reshape(4, 2)
+            except ValueError as exc:
+                issues.append(f"{label_path}:{line_no}: parse error: {exc}")
+                continue
+            if not np.isfinite(xy).all():
+                issues.append(f"{label_path}:{line_no}: non-finite coordinates")
+                continue
+            if (xy < 0).any() or (xy > 1).any():
+                issues.append(f"{label_path}:{line_no}: clipped coordinates outside [0, 1]")
+            xy[:, 0] = np.clip(xy[:, 0], 0.0, 1.0)
+            xy[:, 1] = np.clip(xy[:, 1], 0.0, 1.0)
             xy[:, 0] *= img_w
             xy[:, 1] *= img_h
             out.append((cls, xy.astype(np.float32)))
-    return out
+    return (out, issues) if return_issues else out
 
 
 # --------------------------------------------------------------------------- #
@@ -379,6 +400,7 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
     n_gt = np.zeros(nc, dtype=np.int64)
     cm = np.zeros((nc + 1, nc + 1), dtype=np.int64)
     empty_label_detections = []
+    label_issues = []
 
     inf_times = []
     evaluated_images = 0
@@ -390,7 +412,9 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
             continue
         h, w = img.shape[:2]
         label_path = Path(labels_dir) / (img_path.stem + ".txt")
-        gts = load_gt(str(label_path), w, h)
+        gts, issues = load_gt(str(label_path), w, h, return_issues=True)
+        for issue in issues:
+            label_issues.append({"image": img_path.name, "issue": issue})
         if ignore_empty_labels and not gts:
             if (i + 1) % 10 == 0 or i == len(img_paths) - 1:
                 print(f"  [{i + 1:>4}/{len(img_paths)}] {img_path.name} (skipped empty label)")
@@ -520,6 +544,7 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
         "num_images": evaluated_images,
         "num_input_images": len(img_paths),
         "empty_label_detections": empty_label_detections,
+        "label_issues": label_issues,
         "confmat_conf": confmat_conf,
         "raw_class_score_max": max_raw_class_score,
         "patched_output": patched_output,
@@ -540,7 +565,8 @@ def print_per_class(name, result):
     header = (
         f"{'class':<22}{'GT':>6}"
         f"{'P50':>9}{'R50':>9}{'F1-50':>9}{'AP50':>9}{'AP50-95':>10}"
-        f"{'P25':>9}{'R25':>9}{'F1-25':>9}{'AP25':>9}{'conf25':>9}"
+        f"{'Precision 0.25':>15}{'Recall 0.25':>13}{'F1 0.25':>11}"
+        f"{'AP 0.25':>10}"
     )
     print(header)
     print("-" * len(header))
@@ -558,7 +584,6 @@ def print_per_class(name, result):
             f"{result['recall25'][c]:>9.4f}"
             f"{result['f1_25'][c]:>9.4f}"
             f"{result['ap25'][c]:>9.4f}"
-            f"{result['conf_thr25'][c]:>9.4f}"
         )
     print("-" * len(header))
     print(
@@ -599,6 +624,16 @@ def print_empty_label_warning(name, result):
         )
 
 
+def print_label_issue_warning(name, result):
+    rows = result.get("label_issues", [])
+    if not rows:
+        return
+    print(f"\n[WARN] {name}: {len(rows)} label rows/files needed attention.")
+    print("       Coordinates outside [0, 1] are clipped to image bounds before evaluation.")
+    for row in rows[:8]:
+        print(f"       {row['image']}: {row['issue']}")
+
+
 def print_int8_output_warning(name, result):
     max_score = result["raw_class_score_max"]
     if max_score > CONF_THRESHOLD_INFER:
@@ -632,8 +667,8 @@ def save_metrics_csv(path, name, result):
         w.writerow([])
         w.writerow([
             "class", "GT",
-            "precision50", "recall50", "F1-50", "AP50", "AP50-95", "best_conf50",
-            "precision25", "recall25", "F1-25", "AP25", "best_conf25",
+            "precision50", "recall50", "F1-50", "AP50", "AP50-95",
+            "precision 0.25", "recall 0.25", "F1 0.25", "AP 0.25",
         ])
         for c, cname in enumerate(classes):
             w.writerow([
@@ -644,12 +679,10 @@ def save_metrics_csv(path, name, result):
                 f"{result['f1'][c]:.6f}",
                 f"{result['ap'][c, 0]:.6f}",
                 f"{result['ap'][c].mean():.6f}",
-                f"{result['conf_thr'][c]:.6f}",
                 f"{result['precision25'][c]:.6f}",
                 f"{result['recall25'][c]:.6f}",
                 f"{result['f1_25'][c]:.6f}",
                 f"{result['ap25'][c]:.6f}",
-                f"{result['conf_thr25'][c]:.6f}",
             ])
         w.writerow([
             "mean",
@@ -659,12 +692,10 @@ def save_metrics_csv(path, name, result):
             f"{result['f1'].mean():.6f}",
             f"{result['map50']:.6f}",
             f"{result['map5095']:.6f}",
-            "",
             f"{result['precision25'].mean():.6f}",
             f"{result['recall25'].mean():.6f}",
             f"{result['f1_25'].mean():.6f}",
             f"{result['map25']:.6f}",
-            "",
         ])
         w.writerow([])
         w.writerow(["inference_ms_mean", f"{result['inference_ms_mean']:.4f}"])
@@ -685,80 +716,127 @@ def save_metrics_png(path, name, result):
         print(f"  (matplotlib unavailable, skipping {path}: {exc})")
         return
 
+    def style_table(table, n_rows):
+        table.auto_set_font_size(False)
+        table.set_fontsize(10)
+        table.scale(1, 1.3)
+        for (row, col), cell in table.get_celld().items():
+            cell.set_edgecolor("#D0D7DE")
+            cell.set_linewidth(0.8)
+            if row == 0:
+                cell.set_facecolor("#1F4E79")
+                cell.set_text_props(color="white", weight="bold")
+            elif row == n_rows - 1:
+                cell.set_facecolor("#EAF2F8")
+                cell.set_text_props(weight="bold")
+            elif row % 2 == 0:
+                cell.set_facecolor("#F6F8FA")
+            if col == 0 and row > 0:
+                cell.set_text_props(ha="left")
+
     classes = result["classes"]
-    columns = [
-        "class", "P50", "R50", "F1-50", "AP50", "AP50-95",
-        "P25", "R25", "F1-25", "AP25", "conf25",
+    standard_columns = [
+        "class", "Precision", "Recall", "F1", "AP", "AP50-95",
     ]
-    rows = []
+    permissive_columns = ["class", "Precision", "Recall", "F1", "AP"]
+    standard_rows = []
+    permissive_rows = []
     for c, cname in enumerate(classes):
-        rows.append([
+        standard_rows.append([
             cname,
             f"{result['precision'][c]:.4f}",
             f"{result['recall'][c]:.4f}",
             f"{result['f1'][c]:.4f}",
             f"{result['ap'][c, 0]:.4f}",
             f"{result['ap'][c].mean():.4f}",
+        ])
+        permissive_rows.append([
+            cname,
             f"{result['precision25'][c]:.4f}",
             f"{result['recall25'][c]:.4f}",
             f"{result['f1_25'][c]:.4f}",
             f"{result['ap25'][c]:.4f}",
-            f"{result['conf_thr25'][c]:.4f}",
         ])
-    rows.append([
+    standard_rows.append([
         "mean",
         f"{result['precision'].mean():.4f}",
         f"{result['recall'].mean():.4f}",
         f"{result['f1'].mean():.4f}",
         f"{result['map50']:.4f}",
         f"{result['map5095']:.4f}",
+    ])
+    permissive_rows.append([
+        "mean",
         f"{result['precision25'].mean():.4f}",
         f"{result['recall25'].mean():.4f}",
         f"{result['f1_25'].mean():.4f}",
         f"{result['map25']:.4f}",
-        "",
     ])
 
-    fig_h = 1.1 + 0.42 * (len(rows) + 1)
-    fig, ax = plt.subplots(figsize=(15, fig_h))
+    fig, ax = plt.subplots(figsize=(12.5, 6.3))
     ax.axis("off")
     ax.set_title(f"{name} — per-class metrics", fontsize=16, fontweight="bold", pad=8)
     ax.text(
         0.5, 0.88,
-        f"NMS_IOU={NMS_IOU:.2f} | standard IoU=0.50 | permissive IoU={PERMISSIVE_IOU:.2f}",
+        f"Inference confidence threshold: {CONF_THRESHOLD_INFER:.3f} | "
+        f"NMS IoU threshold: {NMS_IOU:.2f} | "
+        f"Precision/Recall/F1 IoU thresholds: 0.50 and {PERMISSIVE_IOU:.2f}",
         transform=ax.transAxes,
         ha="center",
         va="center",
         fontsize=10,
         color="#4B5563",
     )
-    table = ax.table(
-        cellText=rows,
-        colLabels=columns,
-        bbox=[0.0, 0.02, 1.0, 0.72],
+    ax.text(
+        0.5, 0.82,
+        f"AP50-95 IoU thresholds: 0.50 to 0.95 | AP25 IoU threshold: {PERMISSIVE_IOU:.2f} | "
+        f"Confusion matrix IoU threshold: {CONFMAT_IOU:.2f} | "
+        f"Confusion matrix confidence threshold: {result['confmat_conf']:.2f}",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=10,
+        color="#4B5563",
+    )
+    ax.text(
+        0.5, 0.73,
+        "Metrics at IoU threshold 0.50",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=12,
+        fontweight="bold",
+        color="#172033",
+    )
+    standard_table = ax.table(
+        cellText=standard_rows,
+        colLabels=standard_columns,
+        bbox=[0.04, 0.42, 0.92, 0.28],
         cellLoc="center",
         colLoc="center",
     )
-    table.auto_set_font_size(False)
-    table.set_fontsize(10)
-    table.scale(1, 1.45)
+    style_table(standard_table, len(standard_rows) + 1)
 
-    n_rows = len(rows) + 1
-    for (row, col), cell in table.get_celld().items():
-        cell.set_edgecolor("#D0D7DE")
-        cell.set_linewidth(0.8)
-        if row == 0:
-            cell.set_facecolor("#1F4E79")
-            cell.set_text_props(color="white", weight="bold")
-        elif row == n_rows - 1:
-            cell.set_facecolor("#EAF2F8")
-            cell.set_text_props(weight="bold")
-        elif row % 2 == 0:
-            cell.set_facecolor("#F6F8FA")
-        if col == 0 and row > 0:
-            cell.set_text_props(ha="left")
+    ax.text(
+        0.5, 0.34,
+        f"Permissive metrics at IoU threshold {PERMISSIVE_IOU:.2f}",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=12,
+        fontweight="bold",
+        color="#172033",
+    )
+    permissive_table = ax.table(
+        cellText=permissive_rows,
+        colLabels=permissive_columns,
+        bbox=[0.08, 0.03, 0.84, 0.28],
+        cellLoc="center",
+        colLoc="center",
+    )
+    style_table(permissive_table, len(permissive_rows) + 1)
 
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.84, bottom=0.06)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.90, bottom=0.04)
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -786,6 +864,16 @@ def save_empty_label_report(path, result):
                 "max_conf": f"{row['max_conf']:.6f}",
                 "classes": row["classes"],
             })
+
+
+def save_label_issue_report(path, result):
+    rows = result.get("label_issues", [])
+    if not rows:
+        return
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["image", "issue"])
+        w.writeheader()
+        w.writerows(rows)
 
 
 def save_confusion_png(path, cm, classes, title):
@@ -816,7 +904,9 @@ def save_confusion_png(path, cm, classes, title):
     ax.set_title(f"{title} (row-normalized)", pad=22)
     ax.text(
         0.5, 1.02,
-        f"NMS_IOU={NMS_IOU:.2f} | CONFMAT_IOU={CONFMAT_IOU:.2f} | CONFMAT_CONF={CONFMAT_CONF:.2f}",
+        f"NMS IoU threshold: {NMS_IOU:.2f} | "
+        f"Confusion matrix IoU threshold: {CONFMAT_IOU:.2f} | "
+        f"Confusion matrix confidence threshold: {CONFMAT_CONF:.2f}",
         transform=ax.transAxes,
         ha="center",
         va="bottom",
@@ -872,8 +962,9 @@ def parse_args():
                     metavar="NAME=PATH",
                     help="Model entry (repeatable). Defaults to the bundled "
                          "YOLOv8/YOLO26 INT8 OBB ONNX models.")
-    ap.add_argument("--output-dir", default="benchmark_results/obb_int8_eval",
-                    help="Where to write CSV / PNG outputs.")
+    ap.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
+                    help="Root directory for CSV / PNG outputs. Each model writes "
+                         "to its own subfolder named after the model.")
     ap.add_argument("--providers", nargs="+",
                     default=["CPUExecutionProvider"],
                     help="ONNX Runtime execution providers.")
@@ -898,6 +989,16 @@ def parse_model_args(items):
     return out
 
 
+def resolve_model_path(path):
+    model_path = Path(path)
+    if model_path.is_absolute() or model_path.is_file():
+        return str(model_path)
+    script_relative = SCRIPT_DIR / model_path
+    if script_relative.is_file():
+        return str(script_relative)
+    return str(model_path)
+
+
 def main():
     args = parse_args()
     models = parse_model_args(args.model) if args.model else dict(DEFAULT_MODELS)
@@ -911,12 +1012,13 @@ def main():
 
     summaries = {}
     for name, mp in models.items():
-        if not os.path.isfile(mp):
+        model_path = resolve_model_path(mp)
+        if not os.path.isfile(model_path):
             print(f"[WARN] {name}: model not found at {mp} — skipping")
             continue
-        print(f"\n=== Evaluating {name} ({mp}) ===")
+        print(f"\n=== Evaluating {name} ({model_path}) ===")
         result = evaluate(
-            mp, args.images, args.labels, args.providers, args.classes,
+            model_path, args.images, args.labels, args.providers, args.classes,
             ignore_empty_labels=args.ignore_empty_labels,
             confmat_conf=args.confmat_conf,
         )
@@ -925,32 +1027,40 @@ def main():
         print_per_class(name, result)
         print_int8_output_warning(name, result)
         print_empty_label_warning(name, result)
+        print_label_issue_warning(name, result)
         print_confusion_matrix(
             name, result["confusion_matrix"], args.classes, args.confmat_conf
         )
 
         slug = name.lower().replace("/", "_").replace(" ", "_")
+        model_output_dir = os.path.join(args.output_dir, slug)
+        os.makedirs(model_output_dir, exist_ok=True)
         save_metrics_csv(
-            os.path.join(args.output_dir, f"{slug}_metrics.csv"), name, result
+            os.path.join(model_output_dir, "metrics.csv"), name, result
         )
         save_metrics_png(
-            os.path.join(args.output_dir, f"{slug}_metrics.png"), name, result
+            os.path.join(model_output_dir, "metrics.png"), name, result
         )
         save_confusion_csv(
-            os.path.join(args.output_dir, f"{slug}_confusion_matrix.csv"),
+            os.path.join(model_output_dir, "confusion_matrix.csv"),
             result["confusion_matrix"],
             args.classes,
         )
         save_empty_label_report(
-            os.path.join(args.output_dir, f"{slug}_empty_label_detections.csv"),
+            os.path.join(model_output_dir, "empty_label_detections.csv"),
+            result,
+        )
+        save_label_issue_report(
+            os.path.join(model_output_dir, "label_issues.csv"),
             result,
         )
         save_confusion_png(
-            os.path.join(args.output_dir, f"{slug}_confusion_matrix.png"),
+            os.path.join(model_output_dir, "confusion_matrix.png"),
             result["confusion_matrix"],
             args.classes,
             f"{name} — confusion matrix",
         )
+        print(f"[OK] {name}: artifacts written to {model_output_dir}")
 
     if not summaries:
         raise SystemExit("No models evaluated.")

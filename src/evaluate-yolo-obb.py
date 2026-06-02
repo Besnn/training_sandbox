@@ -34,26 +34,31 @@ IOU_THRESHOLDS = np.linspace(0.5, 0.95, 10)
 
 # Match Ultralytics val defaults: keep loose conf during AP collection
 CONF_THRESHOLD_INFER = 0.001
-NMS_IOU = 0.25
+NMS_IOU = 0.1
 
 # Confusion matrix thresholds (mirror Ultralytics defaults)
 CONFMAT_IOU = 0.25
-CONFMAT_CONF = 0.6
+CONFMAT_CONF = 0.5
 
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_MODELS = {
-    "YOLOv8-OBB": "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx",
-    # "YOLO26-OBB": "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx",
+    # "YOLOv8n-OBB-fp32": "models/yolov8n-obb-onnx/yolov8n-obb-fp32.onnx",
+    # "YOLO26n-OBB-fp32": "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx",
+    "YOLOv8m-OBB-fp32": "models/yolov8m-obb-onnx/yolov8m-obb-fp32.onnx"
 }
 DEFAULT_VAL_IMAGES = (
     "/Users/besnn/PycharmProjects/YOLOv8 Traffic Light Model/"
-    "traffic_signal_detection/src/datasets/split_obb_dataset/test/images"
+    "traffic_signal_detection/src/datasets/yolo_pl_test/images"
+    # "traffic_signal_detection/src/datasets/split_obb_dataset/test/images"
 )
 DEFAULT_VAL_LABELS = (
     "/Users/besnn/PycharmProjects/YOLOv8 Traffic Light Model/"
-    "traffic_signal_detection/src/datasets/split_obb_dataset/test/labels"
+    "traffic_signal_detection/src/datasets/yolo_pl_test/labels"
+    # "traffic_signal_detection/src/datasets/split_obb_dataset/test/labels"
 )
+DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR / "benchmark_results")
 
 
 # --------------------------------------------------------------------------- #
@@ -75,22 +80,38 @@ def poly_iou(poly_a: np.ndarray, poly_b: np.ndarray) -> float:
 # --------------------------------------------------------------------------- #
 # I/O
 # --------------------------------------------------------------------------- #
-def load_gt(label_path: str, img_w: int, img_h: int):
-    """Return list of (class_id, polygon[4,2] in pixel coords)."""
+def load_gt(label_path: str, img_w: int, img_h: int, return_issues=False):
+    """Return list of (class_id, polygon[4,2] in clipped pixel coords)."""
     out = []
+    issues = []
     if not os.path.isfile(label_path):
-        return out
+        issues.append(f"missing label file: {label_path}")
+        return (out, issues) if return_issues else out
     with open(label_path) as f:
-        for raw in f:
+        for line_no, raw in enumerate(f, start=1):
             parts = raw.strip().split()
-            if len(parts) < 9:
+            if not parts:
                 continue
-            cls = int(parts[0])
-            xy = np.array(parts[1:9], dtype=np.float64).reshape(4, 2)
+            if len(parts) < 9:
+                issues.append(f"{label_path}:{line_no}: expected 9 values, got {len(parts)}")
+                continue
+            try:
+                cls = int(float(parts[0]))
+                xy = np.array(parts[1:9], dtype=np.float64).reshape(4, 2)
+            except ValueError as exc:
+                issues.append(f"{label_path}:{line_no}: parse error: {exc}")
+                continue
+            if not np.isfinite(xy).all():
+                issues.append(f"{label_path}:{line_no}: non-finite coordinates")
+                continue
+            if (xy < 0).any() or (xy > 1).any():
+                issues.append(f"{label_path}:{line_no}: clipped coordinates outside [0, 1]")
+            xy[:, 0] = np.clip(xy[:, 0], 0.0, 1.0)
+            xy[:, 1] = np.clip(xy[:, 1], 0.0, 1.0)
             xy[:, 0] *= img_w
             xy[:, 1] *= img_h
             out.append((cls, xy.astype(np.float32)))
-    return out
+    return (out, issues) if return_issues else out
 
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +311,187 @@ def update_confusion_matrix(cm, dets, gts, num_classes, conf_thres=CONFMAT_CONF)
             cm[gc, num_classes] += 1
 
 
+def _cls_name(classes, cls_id):
+    if 0 <= cls_id < len(classes):
+        return classes[cls_id]
+    return f"<cls{cls_id}>"
+
+
+def print_match_debug(image_name, dets, gts, classes, ap_iou=0.5,
+                      confmat_iou=CONFMAT_IOU, confmat_conf=CONFMAT_CONF,
+                      max_dets=30, min_score=0.01):
+    """Explain, per detection, why it ended up TP or FP under both matchers.
+
+    Reports two views in parallel for one image:
+      - Per-class AP path at IoU≥ap_iou (used by mAP/P/R/F1).
+      - Confusion-matrix path at IoU≥confmat_iou and conf≥confmat_conf
+        (class-agnostic).
+
+    For each FP it names the cause: wrong class, GT already consumed by a
+    higher-scoring detection, or no GT overlapped above threshold.
+    """
+    print(f"\n[DEBUG] image={image_name}  GTs={len(gts)}  DETs={len(dets)}")
+    for gi, (gc, gp) in enumerate(gts):
+        corners = ",".join(f"({p[0]:.0f},{p[1]:.0f})" for p in gp)
+        print(f"  GT[{gi}] cls={_cls_name(classes, gc):<18} poly=[{corners}]")
+    if not dets:
+        print("  (no detections at the inference confidence threshold)")
+        return
+    if not gts:
+        print("  (no GT — every detection above conf is a background FP)")
+
+    # Class-agnostic IoU matrix
+    iou_all = np.zeros((len(dets), max(len(gts), 1)), dtype=np.float32)
+    if gts:
+        for di, d in enumerate(dets):
+            for gi, (_, gp) in enumerate(gts):
+                iou_all[di, gi] = poly_iou(d["poly"], gp)
+
+    if gts:
+        print("\n  Class-agnostic IoU matrix (rows = DET in score order, cols = GT):")
+        col_labels = "  ".join(
+            f"GT{gi}/{_cls_name(classes, gts[gi][0])[:6]:<6}"
+            for gi in range(len(gts))
+        )
+        print(f"        {col_labels}")
+        for di, d in enumerate(dets[:max_dets]):
+            cells = "  ".join(f"{iou_all[di, gi]:>6.3f}      " for gi in range(len(gts)))
+            print(
+                f"   D{di:<3} {cells} "
+                f"score={d['score']:.3f} cls={_cls_name(classes, d['cls'])}"
+            )
+        if len(dets) > max_dets:
+            print(f"   ...and {len(dets) - max_dets} more detections")
+
+    # ---- AP path (per-class, greedy by score) ----
+    print(f"\n  Per-class AP matching at IoU≥{ap_iou}:")
+    if gts:
+        same_class = np.array(
+            [[d["cls"] == gc for gc, _ in gts] for d in dets], dtype=bool
+        )
+        iou_class = np.where(same_class, iou_all, 0.0)
+    else:
+        iou_class = np.zeros_like(iou_all)
+    used_ap = [False] * len(gts)
+    for di, d in enumerate(dets):
+        if d["score"] < min_score:
+            continue
+        best_iou, best_gi = ap_iou, -1
+        for gi in range(len(gts)):
+            if used_ap[gi]:
+                continue
+            if iou_class[di, gi] >= best_iou:
+                best_iou = float(iou_class[di, gi])
+                best_gi = gi
+        cname = _cls_name(classes, d["cls"])
+        if best_gi >= 0:
+            used_ap[best_gi] = True
+            gname = _cls_name(classes, gts[best_gi][0])
+            print(
+                f"   D{di:<3} pred={cname:<18} score={d['score']:.3f} "
+                f"→ TP   (GT{best_gi}={gname}, IoU={best_iou:.3f})"
+            )
+        else:
+            # Diagnose the FP
+            reasons = []
+            if gts:
+                same_cls_ious = [
+                    (gi, float(iou_class[di, gi]))
+                    for gi in range(len(gts)) if iou_class[di, gi] > 0
+                ]
+                if same_cls_ious:
+                    gi, iou = max(same_cls_ious, key=lambda x: x[1])
+                    if iou < ap_iou:
+                        reasons.append(
+                            f"best same-class IoU={iou:.3f} < {ap_iou} (GT{gi})"
+                        )
+                    elif used_ap[gi]:
+                        reasons.append(
+                            f"same-class GT{gi} (IoU={iou:.3f}) already taken by "
+                            f"a higher-scoring detection"
+                        )
+                else:
+                    reasons.append("no same-class GT overlaps this detection")
+                cross = [
+                    (gi, gts[gi][0], float(iou_all[di, gi]))
+                    for gi in range(len(gts))
+                    if d["cls"] != gts[gi][0] and iou_all[di, gi] >= ap_iou
+                ]
+                if cross:
+                    cs = ", ".join(
+                        f"GT{gi}={_cls_name(classes, gc)} IoU={iou:.3f}"
+                        for gi, gc, iou in cross
+                    )
+                    reasons.append(f"class mismatch with high-IoU GTs [{cs}]")
+            else:
+                reasons.append("image has no GT")
+            print(
+                f"   D{di:<3} pred={cname:<18} score={d['score']:.3f} "
+                f"→ FP   ({'; '.join(reasons)})"
+            )
+
+    # ---- Confusion-matrix path (class-agnostic, conf-gated) ----
+    print(
+        f"\n  Confusion-matrix matching at IoU≥{confmat_iou}, conf≥{confmat_conf} "
+        f"(class-agnostic):"
+    )
+    used_cm = [False] * len(gts)
+    high_conf_seen = False
+    for di, d in enumerate(dets):
+        if d["score"] < confmat_conf:
+            continue
+        high_conf_seen = True
+        best_iou, best_gi = confmat_iou, -1
+        for gi in range(len(gts)):
+            if used_cm[gi]:
+                continue
+            if iou_all[di, gi] >= best_iou:
+                best_iou = float(iou_all[di, gi])
+                best_gi = gi
+        cname = _cls_name(classes, d["cls"])
+        if best_gi >= 0:
+            used_cm[best_gi] = True
+            gc = gts[best_gi][0]
+            gname = _cls_name(classes, gc)
+            tag = "TP" if d["cls"] == gc else f"CLASS-CONF (predicted as {cname})"
+            print(
+                f"   D{di:<3} pred={cname:<18} score={d['score']:.3f} "
+                f"→ {tag:<32} (GT{best_gi}={gname}, IoU={best_iou:.3f})"
+            )
+        else:
+            # Same diagnostic as AP path but with IoU=confmat_iou
+            note = "no unused GT with sufficient overlap"
+            if gts:
+                ious = [(gi, float(iou_all[di, gi])) for gi in range(len(gts))]
+                gi, iou = max(ious, key=lambda x: x[1])
+                if iou < confmat_iou:
+                    note = f"best IoU={iou:.3f} < {confmat_iou} (GT{gi})"
+                elif used_cm[gi]:
+                    note = (
+                        f"GT{gi} (IoU={iou:.3f}) already taken by a "
+                        f"higher-scoring detection"
+                    )
+            print(
+                f"   D{di:<3} pred={cname:<18} score={d['score']:.3f} "
+                f"→ BG-FP ({note})"
+            )
+    if not high_conf_seen:
+        print(f"   (no detection has score ≥ {confmat_conf})")
+    for gi, (gc, _) in enumerate(gts):
+        if not used_cm[gi]:
+            print(
+                f"   GT{gi}  gt  ={_cls_name(classes, gc):<18}"
+                f"{'':>13}→ MISSED (no high-conf det matched)"
+            )
+
+
+def _image_matches_debug(name, patterns):
+    if not patterns:
+        return False
+    lower = name.lower()
+    return any(p.lower() in lower for p in patterns)
+
+
 # --------------------------------------------------------------------------- #
 # Evaluation driver
 # --------------------------------------------------------------------------- #
@@ -302,7 +504,8 @@ def summarize_high_conf_dets(dets, classes):
 
 
 def evaluate(model_path, images_dir, labels_dir, providers, classes,
-             ignore_empty_labels=False, confmat_conf=CONFMAT_CONF):
+             ignore_empty_labels=False, confmat_conf=CONFMAT_CONF,
+             debug_images=None):
     sess = ort.InferenceSession(model_path, providers=providers)
     inp = sess.get_inputs()[0]
     input_size = int(inp.shape[2])
@@ -322,6 +525,7 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
     n_gt = np.zeros(nc, dtype=np.int64)
     cm = np.zeros((nc + 1, nc + 1), dtype=np.int64)
     empty_label_detections = []
+    label_issues = []
 
     inf_times = []
     evaluated_images = 0
@@ -332,7 +536,9 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
             continue
         h, w = img.shape[:2]
         label_path = Path(labels_dir) / (img_path.stem + ".txt")
-        gts = load_gt(str(label_path), w, h)
+        gts, issues = load_gt(str(label_path), w, h, return_issues=True)
+        for issue in issues:
+            label_issues.append({"image": img_path.name, "issue": issue})
         if ignore_empty_labels and not gts:
             if (i + 1) % 10 == 0 or i == len(img_paths) - 1:
                 print(f"  [{i + 1:>4}/{len(img_paths)}] {img_path.name} (skipped empty label)")
@@ -369,6 +575,12 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
             stats_conf[d["cls"]].append(d["score"])
 
         update_confusion_matrix(cm, dets, gts, nc, confmat_conf)
+
+        if _image_matches_debug(img_path.name, debug_images):
+            print_match_debug(
+                img_path.name, dets, gts, classes,
+                confmat_iou=CONFMAT_IOU, confmat_conf=confmat_conf,
+            )
 
         if (i + 1) % 10 == 0 or i == len(img_paths) - 1:
             print(f"  [{i + 1:>4}/{len(img_paths)}] {img_path.name}")
@@ -426,6 +638,7 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
         "num_images": evaluated_images,
         "num_input_images": len(img_paths),
         "empty_label_detections": empty_label_detections,
+        "label_issues": label_issues,
         "confmat_conf": confmat_conf,
     }
 
@@ -488,6 +701,16 @@ def print_empty_label_warning(name, result):
         )
 
 
+def print_label_issue_warning(name, result):
+    rows = result.get("label_issues", [])
+    if not rows:
+        return
+    print(f"\n[WARN] {name}: {len(rows)} label rows/files needed attention.")
+    print("       Coordinates outside [0, 1] are clipped to image bounds before evaluation.")
+    for row in rows[:8]:
+        print(f"       {row['image']}: {row['issue']}")
+
+
 def print_confusion_matrix(name, cm, classes, confmat_conf=CONFMAT_CONF):
     labels = list(classes) + ["background"]
     width = max(max(len(l) for l in labels), 10)
@@ -508,7 +731,7 @@ def save_metrics_csv(path, name, result):
         w = csv.writer(f)
         w.writerow(["model", name])
         w.writerow([])
-        w.writerow(["class", "GT", "precision", "recall", "F1", "AP50", "AP50-95", "best_conf"])
+        w.writerow(["class", "GT", "precision", "recall", "F1", "AP50", "AP50-95"])
         for c, cname in enumerate(classes):
             w.writerow([
                 cname,
@@ -518,7 +741,6 @@ def save_metrics_csv(path, name, result):
                 f"{result['f1'][c]:.6f}",
                 f"{result['ap'][c, 0]:.6f}",
                 f"{result['ap'][c].mean():.6f}",
-                f"{result['conf_thr'][c]:.6f}",
             ])
         w.writerow([
             "mean",
@@ -528,7 +750,6 @@ def save_metrics_csv(path, name, result):
             f"{result['f1'].mean():.6f}",
             f"{result['map50']:.6f}",
             f"{result['map5095']:.6f}",
-            "",
         ])
         w.writerow([])
         w.writerow(["inference_ms_mean", f"{result['inference_ms_mean']:.4f}"])
@@ -550,7 +771,7 @@ def save_metrics_png(path, name, result):
         return
 
     classes = result["classes"]
-    columns = ["class", "precision", "recall", "F1", "AP50", "AP50-95", "best_conf"]
+    columns = ["class", "precision", "recall", "F1", "AP50", "AP50-95"]
     rows = []
     for c, cname in enumerate(classes):
         rows.append([
@@ -560,7 +781,6 @@ def save_metrics_png(path, name, result):
             f"{result['f1'][c]:.4f}",
             f"{result['ap'][c, 0]:.4f}",
             f"{result['ap'][c].mean():.4f}",
-            f"{result['conf_thr'][c]:.4f}",
         ])
     rows.append([
         "mean",
@@ -569,17 +789,38 @@ def save_metrics_png(path, name, result):
         f"{result['f1'].mean():.4f}",
         f"{result['map50']:.4f}",
         f"{result['map5095']:.4f}",
-        "",
     ])
 
     fig_h = 1.1 + 0.42 * (len(rows) + 1)
     fig, ax = plt.subplots(figsize=(11, fig_h))
     ax.axis("off")
     ax.set_title(f"{name} — per-class metrics", fontsize=16, fontweight="bold", pad=8)
+    ax.text(
+        0.5, 0.88,
+        f"Inference confidence threshold: {CONF_THRESHOLD_INFER:.3f} | "
+        f"NMS IoU threshold: {NMS_IOU:.2f} | "
+        "Precision/Recall/F1 IoU threshold: 0.50",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=9,
+        color="#4B5563",
+    )
+    ax.text(
+        0.5, 0.82,
+        "AP50-95 IoU thresholds: 0.50 to 0.95 | "
+        f"Confusion matrix IoU threshold: {CONFMAT_IOU:.2f} | "
+        f"Confusion matrix confidence threshold: {result['confmat_conf']:.2f}",
+        transform=ax.transAxes,
+        ha="center",
+        va="center",
+        fontsize=9,
+        color="#4B5563",
+    )
     table = ax.table(
         cellText=rows,
         colLabels=columns,
-        bbox=[0.0, 0.02, 1.0, 0.78],
+        bbox=[0.0, 0.02, 1.0, 0.70],
         cellLoc="center",
         colLoc="center",
     )
@@ -602,7 +843,7 @@ def save_metrics_png(path, name, result):
         if col == 0 and row > 0:
             cell.set_text_props(ha="left")
 
-    fig.subplots_adjust(left=0.02, right=0.98, top=0.86, bottom=0.06)
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.84, bottom=0.06)
     fig.savefig(path, dpi=180, bbox_inches="tight")
     plt.close(fig)
 
@@ -630,6 +871,16 @@ def save_empty_label_report(path, result):
                 "max_conf": f"{row['max_conf']:.6f}",
                 "classes": row["classes"],
             })
+
+
+def save_label_issue_report(path, result):
+    rows = result.get("label_issues", [])
+    if not rows:
+        return
+    with open(path, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["image", "issue"])
+        w.writeheader()
+        w.writerows(rows)
 
 
 def save_confusion_png(path, cm, classes, title):
@@ -707,8 +958,9 @@ def parse_args():
                     metavar="NAME=PATH",
                     help="Model entry (repeatable). Defaults to the bundled "
                          "YOLOv8/YOLO26 fp32 OBB models.")
-    ap.add_argument("--output-dir", default="benchmark_results/obb_eval",
-                    help="Where to write CSV / PNG outputs.")
+    ap.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR,
+                    help="Root directory for CSV / PNG outputs. Each model writes "
+                         "to its own subfolder named after the model.")
     ap.add_argument("--providers", nargs="+",
                     default=["CPUExecutionProvider"],
                     help="ONNX Runtime execution providers.")
@@ -720,6 +972,12 @@ def parse_args():
     ap.add_argument("--confmat-conf", type=float, default=CONFMAT_CONF,
                     help="Confidence threshold for the confusion matrix only. "
                          "AP/P/R/F1 are still computed from the full confidence sweep.")
+    ap.add_argument("--debug-image", action="append", default=None,
+                    metavar="SUBSTRING",
+                    help="Dump per-detection TP/FP diagnosis for any image whose "
+                         "filename contains this substring (case-insensitive). "
+                         "Repeatable. Useful to see which case (class mismatch, "
+                         "GT already used, sub-threshold IoU) explains a FP.")
     return ap.parse_args()
 
 
@@ -731,6 +989,16 @@ def parse_model_args(items):
         name, path = raw.split("=", 1)
         out[name.strip()] = path.strip()
     return out
+
+
+def resolve_model_path(path):
+    model_path = Path(path)
+    if model_path.is_absolute() or model_path.is_file():
+        return str(model_path)
+    script_relative = SCRIPT_DIR / model_path
+    if script_relative.is_file():
+        return str(script_relative)
+    return str(model_path)
 
 
 def main():
@@ -746,45 +1014,55 @@ def main():
 
     summaries = {}
     for name, mp in models.items():
-        if not os.path.isfile(mp):
+        model_path = resolve_model_path(mp)
+        if not os.path.isfile(model_path):
             print(f"[WARN] {name}: model not found at {mp} — skipping")
             continue
-        print(f"\n=== Evaluating {name} ({mp}) ===")
+        print(f"\n=== Evaluating {name} ({model_path}) ===")
         result = evaluate(
-            mp, args.images, args.labels, args.providers, args.classes,
+            model_path, args.images, args.labels, args.providers, args.classes,
             ignore_empty_labels=args.ignore_empty_labels,
             confmat_conf=args.confmat_conf,
+            debug_images=args.debug_image,
         )
         summaries[name] = result
 
         print_per_class(name, result)
         print_empty_label_warning(name, result)
+        print_label_issue_warning(name, result)
         print_confusion_matrix(
             name, result["confusion_matrix"], args.classes, args.confmat_conf
         )
 
         slug = name.lower().replace("/", "_").replace(" ", "_")
+        model_output_dir = os.path.join(args.output_dir, slug)
+        os.makedirs(model_output_dir, exist_ok=True)
         save_metrics_csv(
-            os.path.join(args.output_dir, f"{slug}_metrics.csv"), name, result
+            os.path.join(model_output_dir, "metrics.csv"), name, result
         )
         save_metrics_png(
-            os.path.join(args.output_dir, f"{slug}_metrics.png"), name, result
+            os.path.join(model_output_dir, "metrics.png"), name, result
         )
         save_confusion_csv(
-            os.path.join(args.output_dir, f"{slug}_confusion_matrix.csv"),
+            os.path.join(model_output_dir, "confusion_matrix.csv"),
             result["confusion_matrix"],
             args.classes,
         )
         save_empty_label_report(
-            os.path.join(args.output_dir, f"{slug}_empty_label_detections.csv"),
+            os.path.join(model_output_dir, "empty_label_detections.csv"),
+            result,
+        )
+        save_label_issue_report(
+            os.path.join(model_output_dir, "label_issues.csv"),
             result,
         )
         save_confusion_png(
-            os.path.join(args.output_dir, f"{slug}_confusion_matrix.png"),
+            os.path.join(model_output_dir, "confusion_matrix.png"),
             result["confusion_matrix"],
             args.classes,
             f"{name} — confusion matrix",
         )
+        print(f"[OK] {name}: artifacts written to {model_output_dir}")
 
     if not summaries:
         raise SystemExit("No models evaluated.")

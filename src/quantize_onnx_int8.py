@@ -11,12 +11,12 @@ from onnxruntime.quantization import (
     quant_pre_process
 )
 
-MODEL_FP32 = "models/yolov8n-obb-onnx-quant-preprocessed.onnx"
-MODEL_INT8 = "models/yolov8n-obb-onnx/yolov8n-obb-int8.onnx"
+MODEL_FP32 = "models/tmp/yolo26n-onnx-quant-preprocessed.onnx"
+MODEL_INT8 = "models/yolo26n-obb-onnx/yolo26n-obb-int8.onnx"
 CALIB_DIR = "datasets/split_obb_dataset/train/images"
 
 IMG_SIZE = 640
-NUM_CALIB_IMAGES = 100
+NUM_CALIB_IMAGES = 150
 
 
 class YOLOCalibrationDataReader(CalibrationDataReader):
@@ -89,14 +89,27 @@ if __name__ == "__main__":
         activation_type=QuantType.QUInt8,
         weight_type=QuantType.QInt8,
 
-        # MinMax is simple and stable. Entropy can also be tested.
-        calibrate_method=CalibrationMethod.MinMax,
+        # Percentile is far more robust than MinMax for detection heads —
+        # MinMax let a single calibration outlier crush all class-score
+        # signal to zero. Entropy is the other reasonable choice.
+        calibrate_method=CalibrationMethod.Entropy,
+        # extra_options={"CalibPercentile": 99.999},
+        extra_options={"NumBins": 512},
 
         # Per-channel usually helps Conv accuracy.
         per_channel=True,
 
         # Keep external data disabled unless your model is huge.
         use_external_data_format=False,
+
+        # The OBB head's final Concat mixes box coords (~660), class
+        # sigmoids (~1), and angle (~π) into one tensor. A single shared
+        # uint8 scale collapses class scores to zero. Leave the tail FP32.
+        nodes_to_exclude=[
+            "/model.22/Concat_5",
+            "/model.22/Sigmoid_1",
+            "/model.22/Sigmoid",
+        ],
     )
 
     print("Done.")

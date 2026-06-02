@@ -5,7 +5,7 @@ CUSTOM_MODEL_NAME = "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx"
 
 model = YOLO('models/yolo26n-obb-pt/yolo26n-best.pt')
 
-exported_path = model.export(format='onnx', imgsz=640, opset=21)
+exported_path = model.export(format='onnx', imgsz=640, opset=21, end2end=False)
 
 if exported_path:
     Path(exported_path).rename(CUSTOM_MODEL_NAME)

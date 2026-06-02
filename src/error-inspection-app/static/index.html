@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Error Inspection</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Error Inspection</h1>
+        <p id="subtitle">Benchmark results</p>
+      </div>
+      <div class="model-picker">
+        <label for="modelSelect">Model</label>
+        <select id="modelSelect"></select>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar">
+        <section class="panel compact">
+          <div class="stats" id="stats"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Filters</h2>
+          <label class="search">
+            <span>Search image</span>
+            <input id="searchInput" type="search" placeholder="snap_1026">
+          </label>
+          <div class="toggle-grid">
+            <label><input id="filterFp" type="checkbox" checked> FP</label>
+            <label><input id="filterFn" type="checkbox" checked> FN</label>
+            <label><input id="filterMismatch" type="checkbox" checked> Mismatch</label>
+            <label><input id="filterTp" type="checkbox" checked> TP</label>
+            <label><input id="filterIssues" type="checkbox" checked> Label issues</label>
+          </div>
+          <label class="checkline"><input id="onlySelected" type="checkbox"> Keep selected visible</label>
+        </section>
+
+        <section class="panel">
+          <h2>View</h2>
+          <div class="segmented" role="group" aria-label="Image mode">
+            <button id="rawMode" type="button">Raw</button>
+            <button id="annotatedMode" type="button" class="active">Annotated</button>
+            <button id="compareMode" type="button">Compare</button>
+          </div>
+          <div class="toggle-grid">
+            <label><input id="showGt" type="checkbox" checked> Ground truth</label>
+            <label><input id="showDetections" type="checkbox" checked> Detections</label>
+            <label><input id="showTp" type="checkbox" checked> TP</label>
+            <label><input id="showFp" type="checkbox" checked> FP</label>
+            <label><input id="showFn" type="checkbox" checked> FN</label>
+            <label><input id="showCentroids" type="checkbox"> Centroids</label>
+            <label><input id="showLabels" type="checkbox" checked> Labels</label>
+            <label><input id="fitImage" type="checkbox" checked> Fit</label>
+          </div>
+          <label class="slider-line">
+            <span>Confidence <strong id="confValue">0.00</strong></span>
+            <input id="confSlider" type="range" min="0" max="1" step="0.01" value="0">
+          </label>
+        </section>
+
+        <section class="case-list" id="caseList" aria-label="Inspection cases"></section>
+      </aside>
+
+      <section class="viewer">
+        <div class="viewer-head">
+          <div>
+            <h2 id="caseTitle">Select a case</h2>
+            <p id="caseMeta"></p>
+          </div>
+          <div class="legend">
+            <span class="legend-item gt"></span> GT
+            <span class="legend-item tp"></span> TP
+            <span class="legend-item fp"></span> FP
+            <span class="legend-item fn"></span> FN
+            <span class="legend-item centroid"></span> centroid
+          </div>
+        </div>
+
+        <div class="image-area" id="imageArea">
+          <div class="image-frame" id="rawFrame">
+            <img id="rawImage" alt="Raw validation frame">
+            <canvas id="overlayCanvas"></canvas>
+          </div>
+          <div class="image-frame" id="annotatedFrame">
+            <img id="annotatedImage" alt="Annotated error inspection frame">
+          </div>
+        </div>
+
+        <div class="details">
+          <section>
+            <h3>Ground Truth Labels</h3>
+            <div id="labelTable" class="table"></div>
+          </section>
+          <section>
+            <h3>Case Details</h3>
+            <div id="caseDetails" class="table"></div>
+          </section>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>

@@ -17,15 +17,15 @@ class FOMO_PL_480(nn.Module):
         # NOTA: Edge Impulse usa alpha=0.35, PyTorch di default usa alpha=1.0 (più grosso e preciso).
         backbone = models.mobilenet_v2(weights='DEFAULT').features
 
-        # Tagliamo la rete esattamente al punto di risoluzione 1/8 (block_6)
-        # Questo garantisce che un input 480x480 esca come 60x60 con 32 canali
-        self.features = nn.Sequential(*list(backbone.children())[:7])
+        # Tagliamo la rete esattamente al punto di risoluzione 1/16 (block_13)
+        # Questo garantisce che un input 480x480 esca come 30x30 con 96 canali
+        self.features = nn.Sequential(*list(backbone.children())[:14])
 
         # La testa esatta di FOMO: convoluzioni 1x1, no dropout
         self.head = nn.Sequential(
-            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=1, stride=1),
+            nn.Conv2d(in_channels=96, out_channels=96, kernel_size=1, stride=1),
             nn.ReLU(),
-            nn.Conv2d(in_channels=32, out_channels=num_classes + 1, kernel_size=1, stride=1)
+            nn.Conv2d(in_channels=96, out_channels=num_classes + 1, kernel_size=1, stride=1)
         )
 
     def forward(self, x):
@@ -118,8 +118,8 @@ def train():
     device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
     print(f"Hardware Accelerato: {device}")
 
-    train_ds = YOLOCentroidDataset(train_path)
-    val_ds = YOLOCentroidDataset(val_path)
+    train_ds = YOLOCentroidDataset(train_path, img_size=480, grid_size=30)
+    val_ds = YOLOCentroidDataset(val_path, img_size=480, grid_size=30)
 
     print(f"Immagini trovate: Training={len(train_ds)}, Val={len(val_ds)}")
 

@@ -2,8 +2,8 @@ import torch
 from pathlib import Path
 from training_fomo_v2 import FOMO_PL_480
 
-MODEL_IN = "fomo_pl_mac.pt"
-MODEL_OUT = "models/fomo.onnx"
+MODEL_IN = "models/fomo-pt/fomo_480.pt"
+MODEL_OUT = "models/fomo-480-onnx/fomo-480.onnx"
 
 Path("models").mkdir(parents=True, exist_ok=True)
 

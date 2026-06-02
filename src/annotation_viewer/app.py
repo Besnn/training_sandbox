@@ -20,8 +20,8 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_IMAGES = ROOT / "datasets/split_obb_dataset/train/images"
-DEFAULT_LABELS = ROOT / "datasets/split_obb_dataset/train/labels"
+DEFAULT_IMAGES = ROOT / "datasets/yolo_pl_test/images"
+DEFAULT_LABELS = ROOT / "datasets/yolo_pl_test/labels"
 DEFAULT_CLASSES = ["railroad-crossing", "lights-on", "lights-off", "trefolo"]
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -272,6 +272,12 @@ HTML = r"""<!doctype html>
           <label><input id="showPoints" type="checkbox" checked /> vertices</label>
           <label><input id="dimImage" type="checkbox" /> dim image</label>
         </div>
+        <select id="gridSize" title="Grid overlay size">
+          <option value="0">No grid</option>
+          <option value="8">8x8 px grid</option>
+          <option value="16">16x16 px grid</option>
+          <option value="24">24x24 px grid</option>
+        </select>
       </section>
       <section id="list" class="list"></section>
     </aside>
@@ -318,6 +324,7 @@ HTML = r"""<!doctype html>
       showLabels: document.getElementById("showLabels"),
       showPoints: document.getElementById("showPoints"),
       dimImage: document.getElementById("dimImage"),
+      gridSize: document.getElementById("gridSize"),
       list: document.getElementById("list"),
       title: document.getElementById("title"),
       prev: document.getElementById("prev"),
@@ -423,6 +430,69 @@ HTML = r"""<!doctype html>
       el.raw.textContent = "";
     }
 
+    function labelAnchorOutsidePolygon(pts, labelWidth, labelHeight) {
+      const xs = pts.map(p => p[0]);
+      const ys = pts.map(p => p[1]);
+      const minX = Math.min(...xs);
+      const maxX = Math.max(...xs);
+      const minY = Math.min(...ys);
+      const maxY = Math.max(...ys);
+      const pad = 6;
+
+      const candidates = [
+        { x: minX, y: minY - pad },
+        { x: minX, y: maxY + labelHeight + pad },
+        { x: maxX + pad, y: minY + labelHeight },
+        { x: minX - labelWidth - pad, y: minY + labelHeight },
+      ];
+
+      for (const pos of candidates) {
+        const left = pos.x;
+        const right = pos.x + labelWidth;
+        const top = pos.y - labelHeight;
+        const bottom = pos.y;
+        if (left >= 0 && top >= 0 && right <= el.canvas.width && bottom <= el.canvas.height) {
+          return pos;
+        }
+      }
+
+      const x = Math.max(0, Math.min(minX, el.canvas.width - labelWidth));
+      if (minY - pad - labelHeight >= 0) return { x, y: minY - pad };
+      if (maxY + labelHeight + pad <= el.canvas.height) {
+        return { x, y: maxY + labelHeight + pad };
+      }
+      return { x, y: Math.max(labelHeight, Math.min(minY, el.canvas.height - 3)) };
+    }
+
+    function drawGrid() {
+      const gridSize = Number(el.gridSize.value || 0);
+      if (!gridSize || !state.image.naturalWidth) return;
+
+      // Grid size is expressed in source-image pixels. Scale the step so a
+      // 16x16 or 30x30 overlay still lands on the same image pixels after fit.
+      const step = gridSize * state.scale;
+      if (step < 2) return;
+
+      ctx.save();
+      ctx.strokeStyle = "rgba(255, 255, 255, 0.42)";
+      ctx.lineWidth = 1;
+      for (let x = step; x < el.canvas.width; x += step) {
+        const px = Math.round(x) + 0.5;
+        ctx.beginPath();
+        ctx.moveTo(px, 0);
+        ctx.lineTo(px, el.canvas.height);
+        ctx.stroke();
+      }
+      for (let y = step; y < el.canvas.height; y += step) {
+        const py = Math.round(y) + 0.5;
+        ctx.beginPath();
+        ctx.moveTo(0, py);
+        ctx.lineTo(el.canvas.width, py);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
     function draw() {
       if (!state.image.naturalWidth) return;
       const s = state.scale;
@@ -432,6 +502,7 @@ HTML = r"""<!doctype html>
         ctx.fillStyle = "rgba(0, 0, 0, 0.32)";
         ctx.fillRect(0, 0, el.canvas.width, el.canvas.height);
       }
+      drawGrid();
       state.annotations.forEach((ann, idx) => {
         const color = colors[ann.class_id % colors.length];
         const pts = ann.points.map(([x, y]) => [x * el.canvas.width, y * el.canvas.height]);
@@ -452,16 +523,17 @@ HTML = r"""<!doctype html>
           });
         }
         if (el.showLabels.checked) {
-          const minX = Math.min(...pts.map(p => p[0]));
-          const minY = Math.min(...pts.map(p => p[1]));
           const text = `${className(ann.class_id)} #${idx + 1}`;
           ctx.font = "600 14px system-ui";
           const width = ctx.measureText(text).width + 12;
-          const y = Math.max(22, minY - 8);
+          const height = 22;
+          const pos = labelAnchorOutsidePolygon(pts, width, height);
+          const x = Math.max(0, Math.min(pos.x, el.canvas.width - width));
+          const y = Math.max(height, Math.min(pos.y, el.canvas.height - 3));
           ctx.fillStyle = color;
-          ctx.fillRect(minX, y - 19, width, 22);
+          ctx.fillRect(x, y - height + 3, width, height);
           ctx.fillStyle = "white";
-          ctx.fillText(text, minX + 6, y - 4);
+          ctx.fillText(text, x + 6, y - 4);
         }
       });
     }
@@ -493,6 +565,7 @@ HTML = r"""<!doctype html>
     el.showLabels.onchange = draw;
     el.showPoints.onchange = draw;
     el.dimImage.onchange = draw;
+    el.gridSize.onchange = draw;
     el.prev.onclick = () => selectIndex(Math.max(0, state.selected - 1));
     el.next.onclick = () => selectIndex(Math.min(state.filtered.length - 1, state.selected + 1));
     el.fit.onclick = fitCanvas;

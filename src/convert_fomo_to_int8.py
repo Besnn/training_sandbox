@@ -18,10 +18,10 @@ from PIL import Image
 from training_fomo_v2 import FOMO_PL_480
 
 
-DEFAULT_MODEL_IN = "fomo_pl_mac.pt"
-DEFAULT_ONNX_FP32 = "models/fomo_fp32.onnx"
-DEFAULT_ONNX_PREPROCESSED = "models/fomo_fp32_preprocessed.onnx"
-DEFAULT_ONNX_INT8 = "models/fomo_int8.onnx"
+DEFAULT_MODEL_IN = "models/fomo-pt/fomo_480.pt"
+DEFAULT_ONNX_FP32 = "models/fomo-480-onnx/fomo-480.onnx"
+DEFAULT_ONNX_PREPROCESSED = "models/fomo-onnx-quant-preprocessed.onnx"
+DEFAULT_ONNX_INT8 = "models/fomo-480-onnx/fomo-480-int8.onnx"
 DEFAULT_DATA_YAML = "datasets/split_centroid_dataset/data.yaml"
 DEFAULT_CALIB_DIR = "datasets/split_centroid_dataset/train/images"
 

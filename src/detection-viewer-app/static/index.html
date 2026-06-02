@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Detection Viewer</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Detection Viewer</h1>
+        <p id="subtitle">inspection.json detections only</p>
+      </div>
+      <label class="picker">
+        <span>Model</span>
+        <select id="modelSelect"></select>
+      </label>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <section class="panel">
+          <h2>Filters</h2>
+          <label class="search">
+            <span>Search image</span>
+            <input id="searchInput" type="search" placeholder="snap_1026">
+          </label>
+          <label class="slider">
+            <span>Confidence <strong id="confValue">0.00</strong></span>
+            <input id="confSlider" type="range" min="0" max="1" step="0.01" value="0">
+          </label>
+          <div>
+            <h3>Classes</h3>
+            <div id="classToggles" class="toggle-list"></div>
+          </div>
+          <div>
+            <h3>Status</h3>
+            <div id="statusToggles" class="toggle-list"></div>
+          </div>
+          <label class="check"><input id="showLabels" type="checkbox" checked> Show text labels</label>
+          <label class="check"><input id="fitImage" type="checkbox" checked> Fit image</label>
+        </section>
+        <section id="stats" class="stats"></section>
+        <section id="imageList" class="image-list"></section>
+      </aside>
+
+      <section class="viewer">
+        <div class="viewer-head">
+          <div>
+            <h2 id="imageTitle">Select an image</h2>
+            <p id="imageMeta"></p>
+          </div>
+          <div class="legend" id="legend"></div>
+        </div>
+        <div id="imageFrame" class="image-frame fit">
+          <img id="rawImage" alt="Selected image">
+          <canvas id="overlay"></canvas>
+        </div>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

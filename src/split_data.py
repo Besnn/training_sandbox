@@ -30,9 +30,9 @@ from pathlib import Path
 
 DEFAULT_INPUT = Path("datasets/centroid_dataset")
 DEFAULT_OUTPUT = Path("datasets/split_centroid_dataset")
-DEFAULT_RATIO = (0.8, 0.1, 0.1)
+DEFAULT_RATIO = (0.8, 0.2)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-SPLITS = ("train", "val", "test")
+SPLITS = ("train", "val")
 
 
 @dataclass(frozen=True)
@@ -138,22 +138,22 @@ def write_data_yaml(output_dir: Path, input_dir: Path) -> None:
     src = source_data_yaml(input_dir)
     train = str((output_dir / "train").resolve())
     val = str((output_dir / "val").resolve())
-    test = str((output_dir / "test").resolve())
+    # test = str((output_dir / "test").resolve())
 
     if src:
         text = re.sub(r"(?m)^train:\s*.*$", f"train: {train}", src)
         text = re.sub(r"(?m)^val:\s*.*$", f"val: {val}", text)
-        if re.search(r"(?m)^test:\s*", text):
-            text = re.sub(r"(?m)^test:\s*.*$", f"test: {test}", text)
-        else:
-            text = f"{text.rstrip()}\ntest: {test}\n"
-        if not re.search(r"(?m)^train:\s*", text):
-            text = f"train: {train}\nval: {val}\ntest: {test}\n{text}"
+        # if re.search(r"(?m)^test:\s*", text):
+        #     text = re.sub(r"(?m)^test:\s*.*$", f"test: {test}", text)
+        # else:
+        #     text = f"{text.rstrip()}\ntest: {test}\n"
+        # if not re.search(r"(?m)^train:\s*", text):
+        #     text = f"train: {train}\nval: {val}\ntest: {test}\n{text}"
     else:
         text = (
             f"train: {train}\n"
             f"val: {val}\n"
-            f"test: {test}\n\n"
+            # f"test: {test}\n\n"
             "nc: 4\n"
             'names: ["railroad-crossing", "lights-on", "lights-off", "trefolo"]\n'
             "obb: True\n"

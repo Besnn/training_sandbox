@@ -1,0 +1,19 @@
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\renewcommand{\arraystretch}{1.08}
+\begin{tabular}{lrrrrrrrrr}
+\hline
+\multicolumn{10}{c}{\textbf{YOLO}} \\
+\hline
+\textbf{Configuration} & \textit{Detections} & \textit{TP} & \textit{FP} & \textit{FN} & \textit{Precision} & \textit{Recall} & \textit{F1} & \textit{mAP50} & \textit{mAP50--95} \\
+\hline
+YOLOv8n-INT8@0.25 & 765 & 759 & 6 & 3 & 0.992 & 0.996 & 0.994 & 0.793 & 0.446 \\
+YOLOv8n-INT8@0.5 & 762 & 757 & 5 & 5 & 0.993 & 0.993 & 0.993 & 0.793 & 0.446 \\
+YOLOv8n-INT8@0.75 & 716 & 715 & 1 & 47 & 0.999 & 0.938 & 0.968 & 0.793 & 0.446 \\
+\hline
+\end{tabular}
+\caption{Detection performance comparison.}
+\label{tab:detection-results}
+\end{table}
