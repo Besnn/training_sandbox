@@ -35,13 +35,23 @@ from pathlib import Path
 import cv2
 import numpy as np
 import onnxruntime as ort
+from scipy.ndimage import label as nd_label, maximum_filter
 from scipy.optimize import linear_sum_assignment
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 
 DEFAULT_CLASSES = ["railroad-crossing", "lights-on", "lights-off", "trefolo"]
+
+# Classes trained with Gaussian target smearing. Only railroad-crossing (id 0)
+# rotates, so it is the only class smeared into a soft blob at train time; the
+# rest are static and trained on a single hard cell, firing as sharp peaks. The
+# heatmap decoder uses this to apply sub-cell (blob) refinement to smeared
+# classes only — see _decode_heatmap_peaks.
+SMEARED_CLASSES = (0,)
 DEFAULT_MODELS = {
+    "FOMO-STN-FP32": "models/stn-fomo-480-onnx/stn-fomo-480.onnx",
+    "FOMO-STN-INT8": "models/stn-fomo-480-onnx/stn-fomo-480-int8.onnx",
     "FOMO-FP32": "models/fomo-480-onnx/fomo-480.onnx",
     "FOMO-INT8": "models/fomo-480-onnx/fomo-480-int8.onnx",
 }
@@ -56,8 +66,8 @@ DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR / "benchmark_results/precision-recall/")
 DISTANCE_THRESHOLDS = np.linspace(0.025, 0.125, 10)
 
 # Primary distance for the headline P/R/F1 and AP@d numbers.
-#  sqrt(0.5^2 + 0.5^2) * 1/60 = 0.7078 * 1/60 = 0.012
-PRIMARY_DISTANCE = 0.025
+
+PRIMARY_DISTANCE = 0.047
 # Loose confidence kept while sweeping the P/R curve.
 CONF_THRESHOLD_INFER = 0.05
 # Distance and confidence used for the confusion matrix only.
@@ -117,37 +127,24 @@ def softmax(logits, axis):
     return e / e.sum(axis=axis, keepdims=True)
 
 
-def postprocess(raw, num_classes, conf_thres):
-    """One detection per active cell at its normalized centre.
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-x))
 
-    No clustering, no grid mapping — a cell at (col, row) in an H x W grid sits
-    at ((col+0.5)/W, (row+0.5)/H), the same [0,1] space ground truth uses.
-    Returns dicts shaped like the full pipeline: {"cell": (x, y), "cls", "score"}.
+
+def _decode_softmax_percell(arr, conf_thres):
+    """Legacy head: (num_classes+1, H, W) logits, channel 0 = background, softmax.
+
+    One detection per active foreground cell at its normalized centre.
     """
-    arr = np.asarray(raw, dtype=np.float32)  # cast first: avoids int8 exp overflow
-    if arr.ndim == 4:
-        arr = arr[0]
-    if arr.ndim != 3:
-        raise ValueError(f"Unexpected FOMO output shape: {arr.shape}")
-
-    c = arr.shape[0]
-    if c != num_classes + 1:
-        if arr.shape[-1] == num_classes + 1:  # recover channels-last exports
-            arr = arr.transpose(2, 0, 1)
-        else:
-            raise ValueError(
-                f"FOMO output has {arr.shape[0]} channels, expected {num_classes + 1}"
-            )
-
     probs = softmax(arr, axis=0)
     pred_map = probs.argmax(axis=0)
     score_map = probs.max(axis=0)
     h, w = score_map.shape
 
     dets = []
-    # FOMO channel 0 is background. A cell is a detection only when the best
-    # channel is foreground; otherwise weak foreground probability in a
-    # background-winning cell becomes a false detection and corrupts P/R.
+    # A cell is a detection only when the best channel is foreground; otherwise
+    # weak foreground probability in a background-winning cell becomes a false
+    # detection and corrupts P/R.
     active = (pred_map != 0) & (score_map >= conf_thres)
     for y, x in zip(*np.where(active)):
         dets.append({
@@ -156,6 +153,96 @@ def postprocess(raw, num_classes, conf_thres):
             "score": float(score_map[y, x]),
         })
     return dets
+
+
+def _decode_heatmap_peaks(arr, conf_thres, smeared_classes=SMEARED_CLASSES):
+    """Heatmap head: (num_classes, H, W) logits, per-class sigmoid heatmaps.
+
+    Only the smeared classes (Gaussian target smearing, e.g. railroad-crossing)
+    light up a BLOB of cells; the static classes are trained on a single hard
+    cell and fire as a SHARP peak. Either way, emitting one detection per cell
+    (as the softmax path does) would turn a blob into a pile of false positives,
+    so here we keep only LOCAL MAXIMA (3x3) — one detection per peak. There is no
+    global suppression radius, so two nearby same-class peaks each survive (no
+    merge-induced false negatives).
+
+    The peak centre is refined to sub-cell precision ONLY for smeared classes,
+    where a score-weighted average over the 3x3 blob is meaningful. For static
+    classes there is no blob to average — the activation is a lone spike whose
+    near-zero neighbours would only bias the centre — so the peak cell's centre
+    is reported directly.
+    """
+    probs = sigmoid(arr)               # (C, H, W) in [0, 1]
+    pred_map = probs.argmax(axis=0)
+    score_map = probs.max(axis=0)
+    h, w = score_map.shape
+
+    mx = maximum_filter(score_map, size=3, mode="constant", cval=0.0)
+    peak_mask = (score_map == mx) & (score_map >= conf_thres)
+    if not peak_mask.any():
+        return []
+
+    # Collapse flat plateaus (equal-valued adjacent peaks) to one peak each.
+    labeled, n_comp = nd_label(peak_mask, structure=np.ones((3, 3), dtype=np.int32))
+
+    dets = []
+    for comp_id in range(1, n_comp + 1):
+        ys, xs = np.where(labeled == comp_id)
+        pi = int(np.argmax(score_map[ys, xs]))
+        py, px = int(ys[pi]), int(xs[pi])  # representative peak cell of the plateau
+        cls = int(pred_map[py, px])
+
+        if cls in smeared_classes:
+            # Sub-cell refinement: score-weighted centroid over the 3x3 blob.
+            y0, y1 = max(0, py - 1), min(h, py + 2)
+            x0, x1 = max(0, px - 1), min(w, px + 2)
+            win = score_map[y0:y1, x0:x1]
+            wsum = win.sum()
+            gy, gx = np.mgrid[y0:y1, x0:x1]
+            cy = float((win * gy).sum() / wsum) if wsum > 0 else float(py)
+            cx = float((win * gx).sum() / wsum) if wsum > 0 else float(px)
+        else:
+            # Static class: sharp peak, report the peak cell centre directly.
+            cy, cx = float(py), float(px)
+
+        dets.append({
+            "cell": ((cx + 0.5) / w, (cy + 0.5) / h),
+            "cls": cls,
+            "score": float(score_map[py, px]),
+        })
+    return dets
+
+
+def postprocess(raw, num_classes, conf_thres):
+    """Decode FOMO output to detections {"cell": (x, y), "cls", "score"}.
+
+    Auto-detects the head type by channel count:
+      - num_classes+1 channels -> legacy softmax head (background = channel 0),
+        one detection per active foreground cell.
+      - num_classes   channels -> smeared sigmoid-heatmap head (CenterNet-style),
+        one detection per local-maximum peak.
+    Coordinates are normalized: a cell (col,row) in an H x W grid maps to
+    ((col+0.5)/W, (row+0.5)/H), the same [0,1] space ground truth uses.
+    """
+    arr = np.asarray(raw, dtype=np.float32)  # cast first: avoids int8 exp overflow
+    if arr.ndim == 4:
+        arr = arr[0]
+    if arr.ndim != 3:
+        raise ValueError(f"Unexpected FOMO output shape: {arr.shape}")
+
+    # Normalize to channels-first if exported channels-last.
+    if arr.shape[0] not in (num_classes, num_classes + 1):
+        if arr.shape[-1] in (num_classes, num_classes + 1):
+            arr = arr.transpose(2, 0, 1)
+        else:
+            raise ValueError(
+                f"FOMO output has {arr.shape[0]} channels, expected "
+                f"{num_classes} (heatmap) or {num_classes + 1} (softmax)"
+            )
+
+    if arr.shape[0] == num_classes + 1:
+        return _decode_softmax_percell(arr, conf_thres)
+    return _decode_heatmap_peaks(arr, conf_thres)
 
 
 # --------------------------------------------------------------------------- #

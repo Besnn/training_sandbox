@@ -1,10 +1,17 @@
+"""Convert the trained STN-FOMO PyTorch model to INT8 ONNX.
+
+This mirrors convert_fomo_to_int8.py, but uses the STN-FOMO architecture from
+train_stn_fomo.py and infers the number of classes from the checkpoint's final
+head convolution. The STN GridSample op is exported in the FP32 graph and ONNX
+Runtime quantization will quantize supported surrounding ops.
+"""
+
 import argparse
 from pathlib import Path
 
 import numpy as np
 import onnx
 import torch
-import yaml
 from onnxruntime.quantization import (
     CalibrationDataReader,
     CalibrationMethod,
@@ -15,18 +22,17 @@ from onnxruntime.quantization import (
 )
 from PIL import Image
 
-from training_fomo_v2 import FOMO_PL_480
+from train_stn_fomo import STN_FOMO_480
 
 
-DEFAULT_MODEL_IN = "models/fomo-pt/fomo_480.pt"
-DEFAULT_ONNX_FP32 = "models/fomo-480-onnx/fomo-480.onnx"
-DEFAULT_ONNX_PREPROCESSED = "models/fomo-onnx-quant-preprocessed.onnx"
-DEFAULT_ONNX_INT8 = "models/fomo-480-onnx/fomo-480-int8.onnx"
-DEFAULT_DATA_YAML = "datasets/split_centroid_dataset/data.yaml"
+DEFAULT_MODEL_IN = "stn_fomo_mac.pt"
+DEFAULT_ONNX_FP32 = "models/stn-fomo-480-onnx/stn-fomo-480.onnx"
+DEFAULT_ONNX_PREPROCESSED = "models/stn-fomo-onnx-quant-preprocessed.onnx"
+DEFAULT_ONNX_INT8 = "models/stn-fomo-480-onnx/stn-fomo-480-int8.onnx"
 DEFAULT_CALIB_DIR = "datasets/split_centroid_dataset/train/images"
 
 
-class FOMOCalibrationDataReader(CalibrationDataReader):
+class STNCalibrationDataReader(CalibrationDataReader):
     def __init__(self, image_dir, input_name, img_size=480, max_images=100):
         image_dir = Path(image_dir)
         self.image_paths = []
@@ -61,25 +67,23 @@ class FOMOCalibrationDataReader(CalibrationDataReader):
         return {self.input_name: self.preprocess(image_path)}
 
 
-def load_num_classes(data_yaml):
-    with open(data_yaml, "r", encoding="utf-8") as f:
-        data_cfg = yaml.safe_load(f)
-
-    names = data_cfg.get("names")
-    if isinstance(names, dict):
-        return len(names)
-    if isinstance(names, list):
-        return len(names)
-
-    raise ValueError(f"Could not read class names from {data_yaml}")
+def detect_num_classes(state_dict):
+    """num_classes = output channels of the final 1x1 classifier conv in the head."""
+    head_convs = [v for k, v in state_dict.items() if k.startswith("head.") and v.ndim == 4]
+    if not head_convs:
+        raise ValueError("Could not find a head conv in the checkpoint to infer num_classes.")
+    return head_convs[-1].shape[0]
 
 
-def export_fomo_to_onnx(checkpoint_path, output_path, num_classes, img_size, opset):
+def export_stn_to_onnx(checkpoint_path, output_path, img_size, opset):
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Auto-detects the backbone width (alpha 1.0 / 0.35) from the checkpoint.
-    model = FOMO_PL_480.from_checkpoint(checkpoint_path, num_classes=num_classes)
+    state_dict = torch.load(checkpoint_path, map_location="cpu")
+    num_classes = detect_num_classes(state_dict)
+
+    model = STN_FOMO_480(num_classes=num_classes)
+    model.load_state_dict(state_dict)
     model.eval()
 
     dummy_input = torch.randn(1, 3, img_size, img_size)
@@ -96,24 +100,23 @@ def export_fomo_to_onnx(checkpoint_path, output_path, num_classes, img_size, ops
         dynamic_axes=None,
     )
 
+    return num_classes
+
 
 def get_input_name(model_path):
     model = onnx.load(model_path)
     return model.graph.input[0].name
 
 
-def convert_fomo_to_int8(args):
-    num_classes = load_num_classes(args.data_yaml)
-
-    print(f"Classes: {num_classes}")
+def convert_stn_to_int8(args):
     print(f"Exporting FP32 ONNX: {args.checkpoint} -> {args.onnx_fp32}")
-    export_fomo_to_onnx(
+    num_classes = export_stn_to_onnx(
         checkpoint_path=args.checkpoint,
         output_path=args.onnx_fp32,
-        num_classes=num_classes,
         img_size=args.img_size,
         opset=args.opset,
     )
+    print(f"Classes: {num_classes}")
 
     print(f"Preprocessing ONNX for quantization: {args.onnx_fp32} -> {args.onnx_preprocessed}")
     quant_pre_process(
@@ -125,7 +128,7 @@ def convert_fomo_to_int8(args):
     )
 
     input_name = get_input_name(args.onnx_preprocessed)
-    calibration_reader = FOMOCalibrationDataReader(
+    calibration_reader = STNCalibrationDataReader(
         image_dir=args.calib_dir,
         input_name=input_name,
         img_size=args.img_size,
@@ -150,8 +153,8 @@ def convert_fomo_to_int8(args):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Convert the FOMO PyTorch model to INT8 ONNX.")
-    parser.add_argument("--checkpoint", default=DEFAULT_MODEL_IN, help="Input FOMO .pt state dict.")
+    parser = argparse.ArgumentParser(description="Convert the STN-FOMO PyTorch model to INT8 ONNX.")
+    parser.add_argument("--checkpoint", default=DEFAULT_MODEL_IN, help="Input STN-FOMO .pt state dict.")
     parser.add_argument("--onnx-fp32", default=DEFAULT_ONNX_FP32, help="Intermediate FP32 ONNX path.")
     parser.add_argument(
         "--onnx-preprocessed",
@@ -159,9 +162,8 @@ def parse_args():
         help="Intermediate ONNX path after quantization preprocessing.",
     )
     parser.add_argument("--onnx-int8", default=DEFAULT_ONNX_INT8, help="Output INT8 ONNX path.")
-    parser.add_argument("--data-yaml", default=DEFAULT_DATA_YAML, help="Dataset YAML used to infer classes.")
     parser.add_argument("--calib-dir", default=DEFAULT_CALIB_DIR, help="Calibration image directory.")
-    parser.add_argument("--img-size", type=int, default=480, help="Square FOMO input size.")
+    parser.add_argument("--img-size", type=int, default=480, help="Square STN-FOMO input size.")
     parser.add_argument("--num-calib-images", type=int, default=100, help="Number of calibration images.")
     parser.add_argument("--opset", type=int, default=21, help="ONNX opset version.")
 
@@ -169,4 +171,4 @@ def parse_args():
 
 
 if __name__ == "__main__":
-    convert_fomo_to_int8(parse_args())
+    convert_stn_to_int8(parse_args())

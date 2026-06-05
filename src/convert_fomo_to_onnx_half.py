@@ -30,9 +30,8 @@ def export_fomo_to_fp16_onnx(checkpoint_path, output_path, num_classes, img_size
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    model = FOMO_PL_480(num_classes=num_classes)
-    state_dict = torch.load(checkpoint_path, map_location="cpu")
-    model.load_state_dict(state_dict)
+    # Auto-detects the backbone width (alpha 1.0 / 0.35) from the checkpoint.
+    model = FOMO_PL_480.from_checkpoint(checkpoint_path, num_classes=num_classes)
     model.eval()
     model.half()
 

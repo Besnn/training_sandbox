@@ -113,14 +113,21 @@ def class_name(classes: list[str], cls_id: int) -> str:
 
 
 def cell_to_pixel(cell, img_w: int, img_h: int, grid_w: int, grid_h: int) -> tuple[float, float]:
-    """Map a grid cell to raw-image pixels, accounting for FOMO's input crop."""
+    """Map a centroid to raw-image pixels, accounting for FOMO's input crop.
+
+    NOTE: `cell` is already NORMALIZED to [0,1] (both evaluate-fomo's postprocess
+    and load_gt return normalized centroids, not raw grid indices). So we scale by
+    the (cropped) image size directly — dividing by grid_w/grid_h here would
+    normalize a second time and collapse every point into the top-left corner.
+    grid_w/grid_h are kept only for signature compatibility with the callers.
+    """
     crop_left = getattr(FOMO, "CROP_LEFT", 0)
     crop_bottom = getattr(FOMO, "CROP_BOTTOM", 0)
     cropped_w = max(1, img_w - crop_left)
     cropped_h = max(1, img_h - crop_bottom)
     return (
-        crop_left + cell[0] / grid_w * cropped_w,
-        cell[1] / grid_h * cropped_h,
+        crop_left + cell[0] * cropped_w,
+        cell[1] * cropped_h,
     )
 
 
