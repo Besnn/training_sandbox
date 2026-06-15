@@ -96,9 +96,8 @@ def load_mobilenet_v2_035(weights_path=MNV2_035_WEIGHTS_PATH):
 
 
 class FOMO_PL_480(nn.Module):
-    def __init__(self, num_classes, weights_path=MNV2_035_WEIGHTS_PATH,
-                 width_mult=0.35, pretrained=True,
-                 cut_index=14, head_mid=96, head_out=None):
+    def __init__(self, num_classes, pretrained=True,
+                 cut_index=14, head_mid=96, head_out=None, width_mult=1.0):
         super(FOMO_PL_480, self).__init__()
         # Backbone. Training (the default) uses MobileNetV2 alpha=0.35 initialised
         # from the local ImageNet-pretrained checkpoint. To rebuild a model for

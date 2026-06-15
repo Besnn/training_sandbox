@@ -19,7 +19,7 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CLASSES = ["railroad-crossing", "lights-on", "lights-off", "trefolo"]
-DEFAULT_LABELS = str(SCRIPT_DIR / "datasets/split_centroid_dataset/test/labels")
+DEFAULT_LABELS = str(SCRIPT_DIR / "datasets/yolo_pl_test/labels")
 DEFAULT_THRESHOLD_DEG = 5.0
 
 

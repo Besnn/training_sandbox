@@ -32,6 +32,7 @@ const els = {
   showFn: document.querySelector("#showFn"),
   showCentroids: document.querySelector("#showCentroids"),
   showLabels: document.querySelector("#showLabels"),
+  showMatchMetric: document.querySelector("#showMatchMetric"),
   fitImage: document.querySelector("#fitImage"),
   confSlider: document.querySelector("#confSlider"),
   confValue: document.querySelector("#confValue"),
@@ -393,6 +394,9 @@ function shouldShowDetection(status) {
 }
 
 function gtOverlayLabel(gt, row, arch = modelArchitecture()) {
+  if (!els.showMatchMetric.checked) {
+    return `GT ${gt.className}`;
+  }
   const match = Number.isInteger(gt.matchIndex) ? row.detections?.[gt.matchIndex] : null;
   const metricLabel = arch === "fomo" ? "dist" : "IoU";
   if (!match) {
@@ -407,10 +411,14 @@ function gtOverlayLabel(gt, row, arch = modelArchitecture()) {
 
 function detectionOverlayLabel(det, arch = modelArchitecture()) {
   const conf = Number(det.score || 0).toFixed(2);
-  if (arch === "fomo") {
-    return `${det.status} ${det.className} conf ${conf} same dist ${sameClassDistance(det)}`;
+  const base = `${det.status} ${det.className} conf ${conf}`;
+  if (!els.showMatchMetric.checked) {
+    return base;
   }
-  return `${det.status} ${det.className} conf ${conf} same IoU ${sameClassIoU(det)}`;
+  if (arch === "fomo") {
+    return `${base} same dist ${sameClassDistance(det)}`;
+  }
+  return `${base} same IoU ${sameClassIoU(det)}`;
 }
 
 function sameClassIoU(det, preferredGtIndex = null) {
@@ -655,7 +663,7 @@ for (const input of [els.searchInput, els.filterFp, els.filterFn, els.filterMism
 els.rawMode.addEventListener("click", () => setMode("raw"));
 els.annotatedMode.addEventListener("click", () => setMode("annotated"));
 els.compareMode.addEventListener("click", () => setMode("compare"));
-for (const input of [els.showGt, els.showDetections, els.showTp, els.showFp, els.showFn, els.showCentroids, els.showLabels, els.fitImage]) {
+for (const input of [els.showGt, els.showDetections, els.showTp, els.showFp, els.showFn, els.showCentroids, els.showLabels, els.showMatchMetric, els.fitImage]) {
   input.addEventListener("input", renderImageMode);
 }
 els.confSlider.addEventListener("input", () => {

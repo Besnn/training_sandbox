@@ -44,9 +44,9 @@ IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 DEFAULT_MODELS = {
-    # "YOLOv8n-OBB-fp32": "models/yolov8n-obb-onnx/yolov8n-obb-fp32.onnx",
-    # "YOLO26n-OBB-fp32": "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx",
-    "YOLOv8m-OBB-fp32": "models/yolov8m-obb-onnx/yolov8m-obb-fp32.onnx"
+    "YOLOv8n-OBB-fp32": "models/yolov8n-obb-onnx/yolov8n-obb-fp32.onnx",
+    "YOLO26n-OBB-fp32": "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx",
+    # "YOLOv8m-OBB-fp32": "models/yolov8m-obb-onnx/yolov8m-obb-fp32.onnx"
 }
 DEFAULT_VAL_IMAGES = (
     "/Users/besnn/PycharmProjects/YOLOv8 Traffic Light Model/"

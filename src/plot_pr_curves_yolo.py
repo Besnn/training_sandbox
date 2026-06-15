@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""Plot per-class precision-recall curves for FOMO / STN-FOMO ONNX models.
+"""Plot per-class precision-recall curves for YOLOv8-OBB / YOLO26-OBB ONNX models.
 
 For every model it sweeps the per-detection confidence, matches detections to
-ground-truth centroids at a single normalized distance, and draws one PR curve
-per class with matplotlib. Each class panel is annotated with its BEST confidence
-(the threshold that maximizes F1) plus that operating point's P / R / F1 and the
+ground-truth oriented boxes by polygon IoU at a single IoU threshold (default
+0.5, the mAP50 operating point), and draws one PR curve per class with
+matplotlib. Each class panel is annotated with its BEST confidence (the
+threshold that maximizes F1) plus that operating point's P / R / F1 and the
 class AP. One PNG is written per model.
 
-Decoding mirrors evaluate-fomo.py and auto-detects the head from the channel
-count:
-  - num_classes+1 channels -> legacy softmax head (background = channel 0)
-  - num_classes   channels -> sigmoid heatmap head (CenterNet / STN-FOMO)
+Decoding mirrors evaluate-yolo-obb.py and supports both ONNX export layouts:
+  - Raw grid (YOLOv8 default):  [cx, cy, w, h, *class_scores, angle]
+  - End-to-end / NMS-free:      [cx, cy, w, h, conf, cls_id, angle]
+
+YOLO-OBB label format (one box per line, normalized):
+    class_id x1 y1 x2 y2 x3 y3 x4 y4
 
 Usage:
-    python3 plot_pr_curves_fomo.py
-    python3 plot_pr_curves_fomo.py \
-        --model "FOMO-STN=models/stn-fomo-480-onnx/stn-fomo-480.onnx" \
-        --images <dir> --labels <dir> --dist 0.05
+    python3 plot_pr_curves_yolo.py
+    python3 plot_pr_curves_yolo.py \
+        --model "YOLOv8m-OBB=models/yolov8m-obb-onnx/yolov8m-obb-fp32.onnx" \
+        --images <dir> --labels <dir> --iou 0.5
 """
 
 import argparse
@@ -26,29 +29,27 @@ from pathlib import Path
 import cv2
 import numpy as np
 import onnxruntime as ort
-from scipy.ndimage import label as nd_label, maximum_filter
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 IMG_EXTS = (".jpg", ".jpeg", ".png", ".bmp")
 
 DEFAULT_CLASSES = ["railroad-crossing", "lights-on", "lights-off", "trefolo"]
-# Classes trained with Gaussian target smearing get sub-cell peak refinement;
-# rigid hard-centroid classes (and STN-FOMO, which is fully rigid) do not.
-SMEARED_CLASSES = (0,)
 DEFAULT_MODELS = {
-    "FOMO-STN-FP32": "models/stn-fomo-480-onnx/stn-fomo-480.onnx",
-    "FOMO-STN-INT8": "models/stn-fomo-480-onnx/stn-fomo-480-int8.onnx",
-    "FOMO-FP32": "models/fomo-480-onnx/fomo-480.onnx",
-    "FOMO-INT8": "models/fomo-480-onnx/fomo-480-int8.onnx",
+    # "YOLOv8m-OBB-fp32": "models/yolov8m-obb-onnx/yolov8m-obb-fp32.onnx",
+    # "YOLOv8n-OBB-fp32": "models/yolov8n-obb-onnx/yolov8n-obb-fp32.onnx",
+    # "YOLOv8n-OBB-int8": "models/yolov8n-obb-onnx/yolov8n-obb-int8.onnx",
+    # "YOLO26n-OBB-fp32": "models/yolo26n-obb-onnx/yolo26n-obb-fp32.onnx",
+    "YOLO26n-OBB-int8": "models/yolo26n-obb-onnx/yolo26n-obb-int8.onnx",
 }
 DEFAULT_VAL_IMAGES = str(SCRIPT_DIR / "datasets/yolo_pl_test/images")
 DEFAULT_VAL_LABELS = str(SCRIPT_DIR / "datasets/yolo_pl_test/labels")
 DEFAULT_OUTPUT_DIR = str(SCRIPT_DIR / "benchmark_results/pr-curves/")
 
-# Matching distance (normalized image units) and the loose confidence floor used
-# to collect detections for the sweep.
-PRIMARY_DISTANCE = 0.047
-CONF_FLOOR = 0.01
+# Match IoU for P/R/F1/AP (mAP50 operating point) and the loose confidence
+# floor used to collect detections for the sweep (mirrors Ultralytics val).
+PRIMARY_IOU = 0.5
+CONF_FLOOR = 0.001
+NMS_IOU = 0.1
 
 # Minimum confidence for the deployable operating point. Each panel highlights
 # the part of the curve at conf >= MIN_CONF, and a single global confidence
@@ -57,123 +58,172 @@ MIN_CONF = 0.5
 
 
 # --------------------------------------------------------------------------- #
-# Inference + decode (mirrors evaluate-fomo.py)
+# Geometry
+# --------------------------------------------------------------------------- #
+def poly_iou(poly_a, poly_b):
+    """IoU between two 4-vertex convex polygons (pixel coords)."""
+    a = cv2.convexHull(poly_a.astype(np.float32))
+    b = cv2.convexHull(poly_b.astype(np.float32))
+    inter, _ = cv2.intersectConvexConvex(a, b)
+    if inter <= 0:
+        return 0.0
+    area_a = cv2.contourArea(a)
+    area_b = cv2.contourArea(b)
+    union = area_a + area_b - inter
+    return float(inter / union) if union > 0 else 0.0
+
+
+# --------------------------------------------------------------------------- #
+# Inference + decode (mirrors evaluate-yolo-obb.py)
 # --------------------------------------------------------------------------- #
 def preprocess(image, input_size):
-    resized = cv2.resize(image, (input_size, input_size), interpolation=cv2.INTER_LINEAR)
-    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-    blob = (rgb.astype(np.float32) / 255.0).transpose(2, 0, 1)
-    return np.expand_dims(blob, 0)
+    """Letterbox image like Ultralytics, preserving aspect ratio."""
+    img_h, img_w = image.shape[:2]
+    gain = min(input_size / img_w, input_size / img_h)
+    new_w, new_h = int(round(img_w * gain)), int(round(img_h * gain))
+    pad_w = (input_size - new_w) / 2
+    pad_h = (input_size - new_h) / 2
+
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    top = int(round(pad_h - 0.1))
+    bottom = int(round(pad_h + 0.1))
+    left = int(round(pad_w - 0.1))
+    right = int(round(pad_w + 0.1))
+    padded = cv2.copyMakeBorder(
+        resized, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114)
+    )
+
+    blob = cv2.cvtColor(padded, cv2.COLOR_BGR2RGB).transpose(2, 0, 1)
+    meta = {"gain": gain, "pad_w": left, "pad_h": top}
+    return np.expand_dims(blob, 0).astype(np.float32) / 255.0, meta
 
 
-def softmax(logits, axis):
-    e = np.exp(logits - logits.max(axis=axis, keepdims=True))
-    return e / e.sum(axis=axis, keepdims=True)
+def xywhr_to_poly(cx, cy, w, h, angle):
+    """Convert YOLO OBB xywhr arrays to 4-point polygons."""
+    cos, sin = np.cos(angle), np.sin(angle)
+    wx, wy = (w / 2) * cos, (w / 2) * sin
+    hx, hy = -(h / 2) * sin, (h / 2) * cos
+    return np.stack(
+        [
+            np.stack([cx + wx + hx, cy + wy + hy], axis=1),
+            np.stack([cx + wx - hx, cy + wy - hy], axis=1),
+            np.stack([cx - wx - hx, cy - wy - hy], axis=1),
+            np.stack([cx - wx + hx, cy - wy + hy], axis=1),
+        ],
+        axis=1,
+    ).astype(np.float32)
 
 
-def sigmoid(x):
-    return 1.0 / (1.0 + np.exp(-x))
+def rotated_nms(dets, iou_thres):
+    keep = []
+    for c in np.unique([d["cls"] for d in dets]):
+        idxs = [i for i, d in enumerate(dets) if d["cls"] == c]
+        idxs.sort(key=lambda i: -dets[i]["score"])
+        while idxs:
+            best = idxs.pop(0)
+            keep.append(best)
+            idxs = [
+                i for i in idxs
+                if poly_iou(dets[best]["poly"], dets[i]["poly"]) <= iou_thres
+            ]
+    return keep
 
 
-def _decode_softmax_percell(arr, conf_thres):
-    probs = softmax(arr, axis=0)
-    pred_map = probs.argmax(axis=0)
-    score_map = probs.max(axis=0)
-    h, w = score_map.shape
-    dets = []
-    active = (pred_map != 0) & (score_map >= conf_thres)
-    for y, x in zip(*np.where(active)):
-        dets.append({
-            "cell": ((int(x) + 0.5) / w, (int(y) + 0.5) / h),
-            "cls": int(pred_map[y, x] - 1),
-            "score": float(score_map[y, x]),
-        })
-    return dets
-
-
-def _decode_heatmap_peaks(arr, conf_thres, smeared_classes=SMEARED_CLASSES):
-    probs = sigmoid(arr)
-    pred_map = probs.argmax(axis=0)
-    score_map = probs.max(axis=0)
-    h, w = score_map.shape
-
-    mx = maximum_filter(score_map, size=3, mode="constant", cval=0.0)
-    peak_mask = (score_map == mx) & (score_map >= conf_thres)
-    if not peak_mask.any():
+def postprocess(raw, input_size, img_w, img_h, num_classes, conf_thres, meta):
+    """Decode YOLO-OBB head (raw grid or end-to-end NMS-free)."""
+    preds = np.squeeze(raw)
+    if preds.ndim == 2 and preds.shape[0] < preds.shape[1]:
+        preds = preds.T
+    if preds.ndim != 2 or preds.shape[1] < 7:
         return []
-    labeled, n_comp = nd_label(peak_mask, structure=np.ones((3, 3), dtype=np.int32))
 
-    dets = []
-    for comp_id in range(1, n_comp + 1):
-        ys, xs = np.where(labeled == comp_id)
-        pi = int(np.argmax(score_map[ys, xs]))
-        py, px = int(ys[pi]), int(xs[pi])
-        cls = int(pred_map[py, px])
-        if cls in smeared_classes:
-            y0, y1 = max(0, py - 1), min(h, py + 2)
-            x0, x1 = max(0, px - 1), min(w, px + 2)
-            win = score_map[y0:y1, x0:x1]
-            wsum = win.sum()
-            gy, gx = np.mgrid[y0:y1, x0:x1]
-            cy = float((win * gy).sum() / wsum) if wsum > 0 else float(py)
-            cx = float((win * gx).sum() / wsum) if wsum > 0 else float(px)
-        else:
-            cy, cx = float(py), float(px)
-        dets.append({
-            "cell": ((cx + 0.5) / w, (cy + 0.5) / h),
-            "cls": cls,
-            "score": float(score_map[py, px]),
-        })
-    return dets
+    raw_grid_cols = 4 + num_classes + 1
+    if preds.shape[1] >= raw_grid_cols:
+        cxcywh = preds[:, :4]
+        class_scores = preds[:, 4 : 4 + num_classes]
+        angles = preds[:, 4 + num_classes]
+        scores = class_scores.max(axis=1)
+        cls_ids = class_scores.argmax(axis=1)
+        end2end = False
+    elif preds.shape[1] == 7:
+        cxcywh = preds[:, :4]
+        scores = preds[:, 4]
+        cls_ids = preds[:, 5].astype(np.int32)
+        angles = preds[:, 6]
+        end2end = True
+    else:
+        return []
 
+    coords_norm = np.nanmax(np.abs(cxcywh)) <= 2.0
 
-def postprocess(raw, num_classes, conf_thres):
-    arr = np.asarray(raw, dtype=np.float32)
-    if arr.ndim == 4:
-        arr = arr[0]
-    if arr.ndim != 3:
-        raise ValueError(f"Unexpected FOMO output shape: {arr.shape}")
-    if arr.shape[0] not in (num_classes, num_classes + 1):
-        if arr.shape[-1] in (num_classes, num_classes + 1):
-            arr = arr.transpose(2, 0, 1)
-        else:
-            raise ValueError(
-                f"FOMO output has {arr.shape[0]} channels, expected "
-                f"{num_classes} (heatmap) or {num_classes + 1} (softmax)"
-            )
-    if arr.shape[0] == num_classes + 1:
-        return _decode_softmax_percell(arr, conf_thres)
-    return _decode_heatmap_peaks(arr, conf_thres)
+    mask = scores > conf_thres
+    if end2end:
+        mask &= (cls_ids >= 0) & (cls_ids < num_classes)
+    if not mask.any():
+        return []
+    cxcywh = cxcywh[mask]
+    angles = angles[mask]
+    scores = scores[mask]
+    cls_ids = cls_ids[mask]
+
+    if coords_norm:
+        cxcywh[:, [0, 2]] *= input_size
+        cxcywh[:, [1, 3]] *= input_size
+
+    gain = meta["gain"]
+    pad_w = meta["pad_w"]
+    pad_h = meta["pad_h"]
+
+    cx = (cxcywh[:, 0] - pad_w) / gain
+    cy = (cxcywh[:, 1] - pad_h) / gain
+    w = cxcywh[:, 2] / gain
+    h = cxcywh[:, 3] / gain
+
+    polys = xywhr_to_poly(cx, cy, w, h, angles)
+    polys[:, :, 0] = np.clip(polys[:, :, 0], 0, img_w)
+    polys[:, :, 1] = np.clip(polys[:, :, 1], 0, img_h)
+
+    dets = [
+        {"poly": polys[i], "cls": int(cls_ids[i]), "score": float(scores[i])}
+        for i in range(len(polys))
+    ]
+    if end2end:
+        return dets
+    keep = rotated_nms(dets, NMS_IOU)
+    return [dets[i] for i in keep]
 
 
 # --------------------------------------------------------------------------- #
 # Ground truth + matching
 # --------------------------------------------------------------------------- #
-def load_gt(label_path):
-    """Return [(class_id, (x, y))] normalized; centroid or 4-corner polygon."""
+def load_gt(label_path, img_w, img_h):
+    """Return [(class_id, polygon[4,2] in clipped pixel coords)]."""
     out = []
     if not os.path.isfile(label_path):
         return out
     with open(label_path) as f:
-        for line in f:
-            p = line.split()
-            if len(p) < 3:
+        for raw in f:
+            parts = raw.strip().split()
+            if len(parts) < 9:
                 continue
-            cls = int(p[0])
-            if len(p) == 9:
-                x = sum(float(p[i]) for i in (1, 3, 5, 7)) / 4.0
-                y = sum(float(p[i]) for i in (2, 4, 6, 8)) / 4.0
-            else:
-                x, y = float(p[1]), float(p[2])
-            out.append((cls, (x, y)))
+            try:
+                cls = int(float(parts[0]))
+                xy = np.array(parts[1:9], dtype=np.float64).reshape(4, 2)
+            except ValueError:
+                continue
+            if not np.isfinite(xy).all():
+                continue
+            xy[:, 0] = np.clip(xy[:, 0], 0.0, 1.0) * img_w
+            xy[:, 1] = np.clip(xy[:, 1], 0.0, 1.0) * img_h
+            out.append((cls, xy.astype(np.float32)))
     return out
 
 
-def match_image(dets, gts, dist_thres, num_classes):
-    """Greedy-by-score, same-class match within dist_thres.
+def match_image(dets, gts, iou_thres, num_classes):
+    """Greedy-by-score, same-class IoU match.
 
     Returns (records, n_gt) where records is a list of (cls, score, is_tp) for
-    every detection and n_gt counts ground-truth centroids per class.
+    every detection and n_gt counts ground-truth boxes per class.
     """
     n_gt = np.zeros(num_classes, dtype=np.int64)
     for gc, _ in gts:
@@ -186,13 +236,13 @@ def match_image(dets, gts, dist_thres, num_classes):
         c = d["cls"]
         if not (0 <= c < num_classes):
             continue
-        best_i, best_dist = -1, dist_thres
-        for i, (gc, (gx, gy)) in enumerate(gts):
+        best_i, best_iou = -1, iou_thres
+        for i, (gc, gp) in enumerate(gts):
             if used[i] or gc != c:
                 continue
-            dist = ((d["cell"][0] - gx) ** 2 + (d["cell"][1] - gy) ** 2) ** 0.5
-            if dist <= best_dist:
-                best_dist, best_i = dist, i
+            iou = poly_iou(d["poly"], gp)
+            if iou >= best_iou:
+                best_iou, best_i = iou, i
         if best_i >= 0:
             used[best_i] = True
             records.append((c, d["score"], True))
@@ -217,10 +267,7 @@ def compute_ap(recall, precision):
 
 
 def pr_curve(scores, tps, n_gt):
-    """Cumulative PR curve plus the best-F1 operating point.
-
-    Returns a dict with recall, precision, ap, and best_{conf,p,r,f1}.
-    """
+    """Cumulative PR curve plus the best-F1 operating point."""
     empty = {"recall": np.array([]), "precision": np.array([]),
              "scores": np.array([]), "f1": np.array([]), "ap": 0.0,
              "best_conf": float("nan"), "best_p": 0.0, "best_r": 0.0,
@@ -289,14 +336,14 @@ def global_best_conf(results, min_conf):
 # Evaluation
 # --------------------------------------------------------------------------- #
 def evaluate(model_path, images_dir, labels_dir, providers, classes,
-             dist_thres, conf_floor):
+             iou_thres, conf_floor):
     sess = ort.InferenceSession(model_path, providers=providers)
     inp = sess.get_inputs()[0]
     in_name = inp.name
     try:
         input_size = int(inp.shape[2])
     except (TypeError, ValueError):
-        input_size = 480
+        input_size = 640
 
     nc = len(classes)
     cls_scores = [[] for _ in range(nc)]
@@ -312,11 +359,13 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
         img = cv2.imread(str(img_path))
         if img is None:
             continue
-        gts = [g for g in load_gt(str(Path(labels_dir) / (img_path.stem + ".txt")))
+        h, w = img.shape[:2]
+        gts = [g for g in load_gt(str(Path(labels_dir) / (img_path.stem + ".txt")), w, h)
                if 0 <= g[0] < nc]
-        out = sess.run(None, {in_name: preprocess(img, input_size)})[0]
-        dets = postprocess(out, nc, conf_floor)
-        records, img_n_gt = match_image(dets, gts, dist_thres, nc)
+        blob, meta = preprocess(img, input_size)
+        out = sess.run(None, {in_name: blob})[0]
+        dets = postprocess(out, input_size, w, h, nc, conf_floor, meta)
+        records, img_n_gt = match_image(dets, gts, iou_thres, nc)
         n_gt += img_n_gt
         for c, score, is_tp in records:
             cls_scores[c].append(score)
@@ -328,7 +377,7 @@ def evaluate(model_path, images_dir, labels_dir, providers, classes,
 # --------------------------------------------------------------------------- #
 # Plotting
 # --------------------------------------------------------------------------- #
-def plot_pr(name, results, classes, dist_thres, out_path, min_conf, glob_conf):
+def plot_pr(name, results, classes, iou_thres, out_path, min_conf, glob_conf):
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -340,7 +389,7 @@ def plot_pr(name, results, classes, dist_thres, out_path, min_conf, glob_conf):
                              squeeze=False)
     gtxt = f"{glob_conf:.3f}" if glob_conf is not None else "n/a"
     fig.suptitle(
-        f"{name} — precision-recall per class (dist ≤ {dist_thres} norm)\n"
+        f"{name} — precision-recall per class (IoU ≥ {iou_thres})\n"
         f"global conf ≥ {min_conf:g} maximizing mean F1 = {gtxt}",
         fontsize=15, fontweight="bold")
 
@@ -410,10 +459,12 @@ def parse_args():
     ap.add_argument("--output-dir", default=DEFAULT_OUTPUT_DIR)
     ap.add_argument("--providers", nargs="+", default=["CPUExecutionProvider"])
     ap.add_argument("--classes", nargs="+", default=DEFAULT_CLASSES)
-    ap.add_argument("--dist", type=float, default=PRIMARY_DISTANCE,
-                    help="Match distance in normalized image units.")
+    ap.add_argument("--iou", type=float, default=PRIMARY_IOU,
+                    help="Match IoU threshold for TP/FP (mAP50 uses 0.5).")
     ap.add_argument("--conf-floor", type=float, default=CONF_FLOOR,
                     help="Loose confidence floor for collecting detections.")
+    ap.add_argument("--min-conf", type=float, default=MIN_CONF,
+                    help="Lower bound for the highlighted/global operating point.")
     return ap.parse_args()
 
 
@@ -453,16 +504,23 @@ def main():
             continue
         print(f"\n=== {name} ({model_path}) ===")
         results = evaluate(model_path, args.images, args.labels, args.providers,
-                           args.classes, args.dist, args.conf_floor)
+                           args.classes, args.iou, args.conf_floor)
+        glob_conf, glob_mean_f1 = global_best_conf(results, args.min_conf)
         for c, cname in enumerate(args.classes):
             r = results[c]
             print(f"  {cname:<22} best_conf={r['best_conf']:.3f}  "
                   f"P={r['best_p']:.3f} R={r['best_r']:.3f} F1={r['best_f1']:.3f} "
                   f"AP={r['ap']:.3f}  (GT={r['n_gt']}, det={r['n_det']})")
+        if glob_conf is not None:
+            print(f"  -> global conf ≥ {args.min_conf:g} maximizing mean F1 = "
+                  f"{glob_conf:.3f}  (mean F1={glob_mean_f1:.3f})")
+        else:
+            print(f"  -> no detection clears conf ≥ {args.min_conf:g}")
 
         slug = name.lower().replace("/", "_").replace(" ", "_")
         out_path = os.path.join(args.output_dir, f"{slug}_pr_curves.png")
-        plot_pr(name, results, args.classes, args.dist, out_path)
+        plot_pr(name, results, args.classes, args.iou, out_path,
+                args.min_conf, glob_conf)
         print(f"[OK] {name}: PR curves written to {out_path}")
         ran = True
 

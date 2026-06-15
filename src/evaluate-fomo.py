@@ -50,10 +50,12 @@ DEFAULT_CLASSES = ["railroad-crossing", "lights-on", "lights-off", "trefolo"]
 # classes only — see _decode_heatmap_peaks.
 SMEARED_CLASSES = (0,)
 DEFAULT_MODELS = {
-    "FOMO-STN-FP32": "models/stn-fomo-480-onnx/stn-fomo-480.onnx",
-    "FOMO-STN-INT8": "models/stn-fomo-480-onnx/stn-fomo-480-int8.onnx",
+    # "FOMO-STN-FP32": "models/stn-fomo-480-onnx/stn-fomo-480.onnx",
+    # "FOMO-STN-INT8": "models/stn-fomo-480-onnx/stn-fomo-480-int8.onnx",
     "FOMO-FP32": "models/fomo-480-onnx/fomo-480.onnx",
     "FOMO-INT8": "models/fomo-480-onnx/fomo-480-int8.onnx",
+    # "FOMO-v4": "models/fomo-480-onnx/fomo-v4-480.onnx",
+    # "FOMO-v5": "models/fomo-480-onnx/fomo-v5-480.onnx",
 }
 DEFAULT_VAL_IMAGES = str(SCRIPT_DIR / "datasets/yolo_pl_test/images")
 DEFAULT_VAL_LABELS = str(SCRIPT_DIR / "datasets/yolo_pl_test/labels")

@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-DEFAULT_INPUT = Path("datasets/centroid_dataset")
-DEFAULT_OUTPUT = Path("datasets/split_centroid_dataset")
+DEFAULT_INPUT = Path("datasets/obb_dataset")
+DEFAULT_OUTPUT = Path("datasets/split_obb_dataset")
 DEFAULT_RATIO = (0.8, 0.2)
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 SPLITS = ("train", "val")

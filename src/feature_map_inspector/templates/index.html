@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FOMO Feature-Map Inspector</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>FOMO Feature-Map Inspector</h1>
+    <p class="sub">Upload an image → run FOMO or STN-FOMO (int8 / fp32) → inspect feature maps and detection heatmaps.</p>
+  </header>
+
+  <main>
+    <section class="controls">
+      <div class="row">
+        <label class="drop" id="drop">
+          <input type="file" id="file" accept="image/*" hidden />
+          <span id="dropText">Click or drop an image…</span>
+        </label>
+      </div>
+
+      <div class="row grid-controls">
+        <div class="ctrl">
+          <label>Model</label>
+          <select id="family">
+            {% for f in families %}<option value="{{ f }}">{{ f }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="ctrl">
+          <label>Precision</label>
+          <select id="precision">
+            {% for p in precisions %}<option value="{{ p }}">{{ p }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="ctrl" style="flex:2">
+          <label>Layer</label>
+          <select id="layer">
+            {# populated by JS on load and when Model changes #}
+          </select>
+        </div>
+        <div class="ctrl">
+          <label>Colormap</label>
+          <select id="colormap">
+            {% for c in colormaps %}<option value="{{ c }}"{% if c == 'viridis' %} selected{% endif %}>{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+        <div class="ctrl">
+          <label>Normalize</label>
+          <select id="norm">
+            <option value="per_channel">per-channel</option>
+            <option value="global">global (whole layer)</option>
+          </select>
+        </div>
+        <div class="ctrl">
+          <label>Tile px</label>
+          <input type="range" id="tile" min="48" max="160" step="4" value="84" />
+        </div>
+      </div>
+
+      <div class="row">
+        <button id="run" disabled>Generate feature maps</button>
+        <label class="chk"><input type="checkbox" id="activeOnly" /> active channels only</label>
+        <label id="bypassChk" class="chk" style="display:none" title="Replace the STN sampling grid with an identity grid — backbone output flows to the detection head without any spatial transformation">
+          <input type="checkbox" id="bypassStn" />
+          Bypass STN
+        </label>
+        <span id="status" class="status"></span>
+      </div>
+    </section>
+
+    <section class="panels">
+      <aside class="meta" id="meta" hidden>
+        <h3>Input (480×480)</h3>
+        <img id="preview" alt="input preview" />
+        <h3>Detection heatmaps</h3>
+        <div id="heatmaps" class="heatmaps"></div>
+        <ul id="scores"></ul>
+        <div id="layerInfo" class="layerInfo"></div>
+      </aside>
+
+      <div class="maps-wrap">
+        <div id="maps" class="maps"></div>
+      </div>
+    </section>
+
+    <div id="bypassBanner" class="bypass-banner" hidden>
+      ⚠ STN bypassed — backbone output flows directly to the detection head (identity transform)
+    </div>
+
+    <section class="rotation-diff" id="rotationDiff" hidden>
+      <h2>Most affected by the STN warp</h2>
+      <p class="sub" id="rdSubtitle"></p>
+      <div id="rdDisplacement" class="rd-displacement" hidden></div>
+      <div id="rotationDiffGrid" class="rd-grid"></div>
+    </section>
+  </main>
+
+  <!-- comparison modal -->
+  <div id="compare" class="compare" hidden>
+    <div class="cmp-inner">
+      <div class="cmp-head">
+        <span id="cmpTitle" class="cmp-title"></span>
+        <div id="cmpModes" class="seg">
+          <button data-mode="overlay" class="active">Overlay</button>
+          <button data-mode="side">Side by side</button>
+          <button data-mode="solo">Feature map</button>
+        </div>
+        <label id="opacityWrap" class="op">Opacity
+          <input type="range" id="opacity" min="0" max="100" value="60" />
+        </label>
+        <button id="cmpClose" class="close" title="Close (Esc)">✕</button>
+      </div>
+      <div class="cmp-body">
+        <canvas id="overlayCanvas" width="480" height="480"></canvas>
+        <div id="sideView" class="side" hidden>
+          <figure><img id="sideOrig" alt="original" /><figcaption>original</figcaption></figure>
+          <figure><img id="sideMap" alt="feature map" /><figcaption>feature map</figcaption></figure>
+        </div>
+        <div id="soloView" class="solo" hidden>
+          <img id="soloMap" alt="feature map" />
+        </div>
+      </div>
+      <div id="cmpStats" class="cmp-stats"></div>
+      <div class="cmp-hint">← → to step through channels · Esc to close</div>
+    </div>
+  </div>
+
+  <!-- layers config for JS (avoids a separate fetch) -->
+  <script>
+    const LAYERS_BY_FAMILY = {{ layers_by_family | tojson }};
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
